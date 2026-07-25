@@ -1,0 +1,137 @@
+//! Post-generation transforms, all table-driven from the registry (R4): add the
+//! template's recommended/driver crates to `Cargo.toml` (via `toml_edit`, so
+//! formatting is preserved), then install the template `main.rs` with XIAO pin
+//! wiring. esp-generate already emitted the correct target/toolchain/backend
+//! stack, so we never touch `.cargo/config.toml` or `rust-toolchain.toml`.
+
+use anyhow::{Context, Result};
+use toml_edit::{DocumentMut, Item, Table, Value};
+
+use crate::model::Config;
+use crate::registry::{self, Backend, ESP_IDF_HAL_VERSION};
+use crate::templates;
+
+pub mod uferris;
+
+pub fn apply(cfg: &Config) -> Result<()> {
+    add_dependencies(cfg)?;
+    install_main(cfg)?;
+    Ok(())
+}
+
+fn add_dependencies(cfg: &Config) -> Result<()> {
+    let cargo_path = cfg.out_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&cargo_path)
+        .with_context(|| format!("reading {}", cargo_path.display()))?;
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("parsing generated {}", cargo_path.display()))?;
+
+    let deps = doc
+        .as_table_mut()
+        .entry("dependencies")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+        .context("[dependencies] is not a table in the generated Cargo.toml")?;
+
+    if cfg.uferris.is_some() {
+        uferris::add_bsp_dep(deps, cfg)?;
+    } else if matches!(cfg.stack.backend, Backend::CargoGenerate) {
+        // ESP `std` base: add the XIAO's esp-idf-hal on top of the template's
+        // esp-idf-svc (R9 — the std path adds the recommended crate set, just
+        // like no_std, against the esp-idf ecosystem). Pinned in the registry.
+        add_dep(deps, "esp-idf-hal", &format!(r#""{ESP_IDF_HAL_VERSION}""#))?;
+    } else if let Some(t) = registry::template(&cfg.template_id) {
+        for d in t.extra_deps {
+            add_dep(deps, d.name, d.spec)?;
+        }
+    }
+
+    // Per-variant default driver crates (the "some XIAOs ship crates by default"
+    // hook — M2 redesign v2). Data-only from the registry; `&[]` for every current
+    // variant, so this is a no-op today but wired for later additions. Applied to
+    // ALL stacks, before the user's own extra crates.
+    for d in cfg.variant.default_crates {
+        add_dep(deps, d.name, d.spec)?;
+    }
+
+    // User-requested extra crates (`--add-crate` / TUI free-form). Applies to
+    // ALL stacks, layered on last so a user pin wins over nothing but does not
+    // silently shadow a registry-required driver crate unless they name it
+    // (M2 redesign, point 5). Specs were validated at resolve time.
+    for spec in &cfg.extra_crates {
+        let (name, value) = crate::model::crate_dependency(spec);
+        add_dep(deps, &name, &value)?;
+    }
+
+    std::fs::write(&cargo_path, doc.to_string())
+        .with_context(|| format!("writing {}", cargo_path.display()))?;
+    Ok(())
+}
+
+/// Insert (or overwrite) a dependency. `spec` is a TOML value literal.
+pub(crate) fn add_dep(deps: &mut Table, name: &str, spec: &str) -> Result<()> {
+    let value: Value = spec
+        .parse()
+        .with_context(|| format!("parsing dependency spec for '{name}': {spec}"))?;
+    deps.insert(name, Item::Value(value));
+    Ok(())
+}
+
+fn install_main(cfg: &Config) -> Result<()> {
+    // KEY DECISION ("esp-generate owns the base"): for the esp-hal (EspGenerate)
+    // stack + a BASE project (no component add-on, µFerris off), do NOT inject our
+    // own main — esp-generate already emitted a valid main for whatever
+    // flashing/logging/framework combo was requested (passed as `-o` flags), so
+    // every base combo is upstream-verified by construction. We still applied
+    // `extra_crates` in `add_dependencies`; nothing else is layered on top.
+    // Component add-ons and µFerris still inject their bodies below; the std
+    // (CargoGenerate) path is unchanged.
+    if matches!(cfg.stack.backend, Backend::EspGenerate)
+        && cfg.uferris.is_none()
+        && registry::is_base_template(&cfg.template_id)
+    {
+        return Ok(());
+    }
+
+    let is_std = matches!(cfg.stack.backend, Backend::CargoGenerate);
+
+    let body = if cfg.uferris.is_some() {
+        templates::uferris_body(&cfg.template_id)
+    } else if is_std {
+        // ESP `std` base: blink (LED variants) or log-hello (no LED), selected
+        // by hardware — the synthetic `base` id has no TEMPLATES entry.
+        Some(templates::std_body(cfg.variant.led.is_some()))
+    } else {
+        templates::body(&cfg.template_id)
+    }
+    .with_context(|| format!("no embedded template body for '{}'", cfg.template_id))?;
+
+    // A template that needs an LED must be paired with a variant that has one.
+    // The registry keeps these consistent; this guards against a bad edit.
+    // (Std `base` handles the LED/no-LED split itself above, so skip it there.)
+    if !is_std {
+        if let Some(t) = registry::template(&cfg.template_id) {
+            if t.needs_led && cfg.variant.led.is_none() {
+                anyhow::bail!(
+                    "template '{}' needs an onboard LED but variant '{}' has none",
+                    t.id,
+                    cfg.variant.id
+                );
+            }
+        }
+    }
+
+    let rendered = templates::render(body, cfg.variant.led);
+
+    // esp-generate/uferris scaffold the app entry at src/bin/main.rs; the
+    // esp-idf-template std layout uses src/main.rs.
+    let main_path = if is_std {
+        cfg.out_dir.join("src").join("main.rs")
+    } else {
+        cfg.out_dir.join("src").join("bin").join("main.rs")
+    };
+    std::fs::write(&main_path, rendered)
+        .with_context(|| format!("writing template to {}", main_path.display()))?;
+    Ok(())
+}

@@ -1,0 +1,38 @@
+# rust-analyzer settings for this project.
+#
+# By default rust-analyzer passes `--all-targets` to cargo, which pulls in the
+# test and bench targets. Those link the `test` crate, and `test` does not exist
+# for bare-metal targets (nor for the esp-idf `build-std` set, which is
+# `["std", "panic_abort"]`). The editor therefore reports
+#
+#     error[E0463]: can't find crate for `test`
+#
+# against a project that `cargo build` compiles perfectly. Turning `--all-targets`
+# off is the fix, and costs nothing here: there are no test targets to analyse.
+#
+# `cargo.allTargets` governs the crate graph rust-analyzer loads and is the
+# setting upstream recommends for bare-metal projects; `check.allTargets`
+# governs the `cargo check` behind the on-save diagnostics and documents itself
+# as defaulting to `cargo.allTargets`. Both are set explicitly so that changing
+# one later cannot silently reintroduce the error.
+#
+# NOTE ON COVERAGE. This file is the editor-agnostic mechanism, and rust-analyzer
+# does read it (it is parsed without error and registered as workspace config).
+# But as of rust-analyzer 1.97.1 a project-local `rust-analyzer.toml` does NOT
+# by itself suppress the diagnostic — verified by driving a real rust-analyzer
+# over LSP, where the error still appeared with this file in place and vanished
+# when the identical keys were supplied as editor (client) config. Upstream still
+# labels `rust-analyzer.toml` a work in progress. So `.vscode/settings.json`
+# carries the same two settings for VS Code, which is the path that is verified
+# to work today; this file is kept because it is the correct long-term home, it
+# is what non-VS-Code editors will read as ratoml support matures, and it
+# documents the intent in one editor-neutral place.
+#
+# If your editor is not VS Code and you still see the error, set these same two
+# keys through your editor's rust-analyzer client configuration.
+
+[cargo]
+allTargets = false
+
+[check]
+allTargets = false

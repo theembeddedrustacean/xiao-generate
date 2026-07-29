@@ -14,10 +14,17 @@ pub const ESP_GENERATE_VERSION: &str = "1.3.0";
 pub const UFERRIS_BSP_VERSION: &str = "0.1.3";
 
 // --- ESP `std` stack (M5): cargo-generate + esp-idf-template pins (R5) ---
-// The esp-idf-template repo has no releases/tags, so the pin is a commit SHA
-// (research/esp-idf-template.md — verified 2026-07-21). cargo-generate itself is
-// pinned only by a minimum (the template's `cargo_generate_version` requirement);
-// the reproducibility-critical pin is the template `--rev`.
+// The esp-idf-template repo has no releases/tags (re-verified 2026-07-29:
+// `git ls-remote --tags` is empty), so the pin is a commit SHA
+// (research/esp-idf-template.md). cargo-generate itself is pinned only by a
+// minimum (the template's `cargo_generate_version` requirement); the
+// reproducibility-critical pin is this revision.
+//
+// NOTE: this SHA is deliberately NOT required to be the branch tip, and must
+// never be "refreshed" to chase upstream. `cargo generate --git … --rev` cannot
+// resolve a non-tip revision (it shallow-clones), so `backend::cargogen` fetches
+// this exact commit itself and expands it with `--path`. See the rationale on
+// `cargogen::fetch_revision`.
 pub const ESP_IDF_TEMPLATE_GIT: &str = "https://github.com/esp-rs/esp-idf-template";
 pub const ESP_IDF_TEMPLATE_REV: &str = "6f092f06c8cef93a41b82b4d5c7373446e9fcf1b";
 pub const CARGO_GENERATE_MIN_VERSION: &str = "0.17.4";
@@ -154,6 +161,16 @@ pub struct Stack {
     pub frameworks: &'static [&'static str],
     /// Direct-scaffold data for the non-ESP backend (M4). `None` on ESP stacks.
     pub scaffold: Option<&'static Scaffold>,
+    /// [`PREREQS`] ids needed to BUILD a project on this stack, **beyond** the
+    /// target/toolchain — that one is always derived from [`Stack::target`],
+    /// whose triple is itself a `PREREQS` id, so it is never repeated here.
+    pub build_prereqs: &'static [&'static str],
+    /// [`PREREQS`] ids needed to FLASH a project from this stack. Empty on the
+    /// stacks where FLASHING is a live user choice (esp-hal): there the
+    /// prerequisites come from the chosen [`ToolChoice`] instead, so the summary
+    /// follows `--flashing`. Elsewhere the flash route is fixed by the board's
+    /// bootloader (or by the template's cargo runner) and lives here.
+    pub flash_prereqs: &'static [&'static str],
 }
 
 impl Stack {
@@ -378,6 +395,11 @@ pub struct ToolChoice {
     /// esp-generate `-o` flags this choice maps to on the esp-hal backend
     /// (internal; never surfaced). `&[]` for "none"/unmapped choices.
     pub esp_options: &'static [&'static str],
+    /// [`PREREQS`] ids this choice needs on the host. Populated for the flashing
+    /// tools (picking `probe-rs` over `espflash` genuinely changes what must be
+    /// installed); `&[]` for the logging/framework catalogs, whose choices are
+    /// plain cargo dependencies and add no host tool.
+    pub prereqs: &'static [&'static str],
 }
 
 /// Flashing tools (universal). espflash + probe-rs are the two flashing tools;
@@ -457,6 +479,378 @@ impl ToolCategory {
 pub fn tool_choice(cat: ToolCategory, id: &str) -> Option<&'static ToolChoice> {
     cat.catalog().iter().find(|c| c.id == id)
 }
+
+// ---------------------------------------------------------------------------
+// Universal EDITOR SUPPORT catalog.
+//
+// Every project xiao-generate emits is a bare-metal (or `build-std`) crate with
+// no `test` crate, so rust-analyzer's default `--all-targets` makes the user's
+// editor report a spurious `E0463: can't find crate for test` against a project
+// that `cargo build` compiles perfectly. The fix is two settings —
+// `cargo.allTargets = false` and `check.allTargets = false` — but the delivery
+// path is EDITOR-SPECIFIC: a project-local `rust-analyzer.toml` is parsed by
+// rust-analyzer yet does not drive flycheck's `--all-targets` (verified against
+// 1.97.1), so each editor needs its own *client* configuration file.
+//
+// Unlike the flashing/logging/framework catalogs, this axis is backend-agnostic:
+// the diagnostic, and its fix, are identical on esp-hal, esp-idf and the non-ESP
+// scaffold, so EDITOR is live on EVERY stack and nothing here greys out.
+//
+// Single-select, exactly like the other universal catalogs: one editor per
+// generated project, with `none` a real catalog entry (emit nothing) rather than
+// a magic flag value. Index 0 is the default, matching `FLASHING_TOOLS`.
+// ---------------------------------------------------------------------------
+
+/// One entry of the universal editor catalog. `path` is where that editor reads
+/// project-local config from — `None` for the `none` entry, which emits nothing.
+/// The file body lives in `templates::editor_config`.
+#[derive(Debug, Clone, Copy)]
+pub struct Editor {
+    pub id: &'static str,
+    pub display: &'static str,
+    /// Project-relative path of the file emitted for this editor, or `None` when
+    /// the entry emits no file at all (`none`).
+    pub path: Option<&'static str>,
+    /// `Some(note)` when the emitted file is NOT picked up automatically and the
+    /// user must opt in. Surfaced in the TUI hint + the summary rather than
+    /// hidden, so we never imply a config is active when it needs a manual step.
+    pub caveat: Option<&'static str>,
+}
+
+/// The universal editor catalog, in display order. **Index 0 is the default**
+/// (VS Code — the delivery path empirically verified to clear the diagnostic in a
+/// real editor, and what every generated project has always carried, so the
+/// default must not regress it). Each `path`/schema was taken from that editor's
+/// own documentation and is pinned by a unit test in `templates`.
+pub const EDITORS: &[Editor] = &[
+    Editor {
+        id: "vscode",
+        display: "VS Code",
+        path: Some(".vscode/settings.json"),
+        caveat: None,
+    },
+    Editor {
+        id: "helix",
+        display: "Helix",
+        path: Some(".helix/languages.toml"),
+        caveat: None,
+    },
+    Editor {
+        id: "zed",
+        display: "Zed",
+        path: Some(".zed/settings.json"),
+        caveat: None,
+    },
+    Editor {
+        id: "neovim",
+        display: "Neovim",
+        path: Some(".nvim.lua"),
+        // Neovim deliberately does NOT source project-local config by default:
+        // `.nvim.lua` is only read when the user has `vim.o.exrc = true`, and
+        // even then the file must be trusted once (`:trust`). There is no
+        // editor-native mechanism that works on a fresh clone, so we state the
+        // opt-in instead of pretending the file is self-executing.
+        caveat: Some("needs `vim.o.exrc = true` + `:trust` (Neovim has no automatic project-local config)"),
+    },
+    Editor {
+        id: "none",
+        display: "none",
+        path: None,
+        caveat: None,
+    },
+];
+
+/// Resolve an editor id.
+pub fn editor(id: &str) -> Option<&'static Editor> {
+    EDITORS.iter().find(|e| e.id == id)
+}
+
+/// The editor used when `--editor` is not given: catalog index 0 (VS Code).
+pub fn default_editor() -> &'static Editor {
+    &EDITORS[0]
+}
+
+// ---------------------------------------------------------------------------
+// HOST PREREQUISITES — what the *user* must already have installed for a
+// generated project to BUILD and to FLASH.
+//
+// Registry data (R4), exactly like the toolchain catalogs above: the print path
+// in `main::print_prerequisites` contains no chip/stack knowledge, it renders
+// whatever `model::prerequisites` selects out of this catalog. Selection is
+// derived from the resolved `Config` (target triple → toolchain, stack → build
+// tools, flashing tool / stack → flash tools), so an `xiao-rp2040` project never
+// mentions espup and an esp-idf project never mentions picotool.
+//
+// Scope note: these are the *generated project's* prerequisites, not
+// xiao-generate's own. The backend generators (esp-generate, cargo-generate) are
+// necessarily already installed by the time a summary prints — they are
+// documented in the README instead.
+// ---------------------------------------------------------------------------
+
+/// How a prerequisite's presence is detected on the host. Every variant is cheap
+/// (one short-lived process at most) and is only run for prerequisites the
+/// resolved config actually needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Probe {
+    /// Present iff this argv can be **spawned** — i.e. the executable resolves on
+    /// `PATH`. The exit status is deliberately ignored: several of these tools
+    /// exit non-zero for a version query yet are perfectly installed (`picotool
+    /// --version` exits 255, and `ldproxy` exits 101 for *every* invocation — it
+    /// is a linker shim, not a CLI). This is the same question `command -v`
+    /// answers, which is what `scripts/matrix.sh` uses. The argv is still chosen
+    /// to be a harmless, instant, side-effect-free query, never a bare
+    /// invocation that might go looking for a board.
+    Binary(&'static [&'static str]),
+    /// Present iff `rustup target list --installed` lists this triple.
+    RustupTarget(&'static str),
+    /// Present iff rustup has an `esp` toolchain whose rustc can build this
+    /// *marker* triple (always the no_std `xtensa-esp32s3-none-elf` — building it
+    /// is what proves the toolchain is Espressif's Xtensa-enabled rustc, which is
+    /// equally the requirement for the `xtensa-*-espidf` std target).
+    ///
+    /// Xtensa is **not** a rustup target — `rustup target add xtensa-…` does not
+    /// work, and custom (espup-linked) toolchains are not listable with `rustup
+    /// target list --toolchain esp` either. The only honest probe is to ask the
+    /// toolchain itself what it can build, which is what `scripts/matrix.sh`
+    /// does.
+    XtensaToolchain(&'static str),
+    /// Present iff `component` is installed on rustup toolchain `toolchain`.
+    /// Used for the RISC-V ESP `std` targets, which are `build-std` targets
+    /// rather than rustup targets: they are built from source by a nightly
+    /// toolchain carrying `rust-src`.
+    RustupComponent {
+        toolchain: &'static str,
+        component: &'static str,
+    },
+}
+
+/// When a prerequisite is needed. Drives the two groups the summary prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// Required before `cargo build` can succeed.
+    Build,
+    /// Required to get the built firmware onto the board.
+    Flash,
+}
+
+/// One host prerequisite. `id` is what stacks/flashing tools reference; for a
+/// Rust target the id **is** the target triple, so `Stack::target` resolves its
+/// own toolchain prerequisite with no extra mapping (pinned by
+/// `every_stack_target_has_a_prerequisite`).
+#[derive(Debug, Clone, Copy)]
+pub struct Prereq {
+    pub id: &'static str,
+    /// User-facing name. Never names a backend generator (v3 UNIFY).
+    pub display: &'static str,
+    pub probe: Probe,
+    /// The exact command that installs it. Shown only when it is missing.
+    pub install: &'static str,
+    pub need: Need,
+    /// Something true about this prerequisite that the install command does not
+    /// convey (e.g. that the first ESP-IDF build is very long). Shown whether or
+    /// not the tool is present.
+    pub note: Option<&'static str>,
+}
+
+/// The prerequisite catalog. Every entry's `install` command and `probe` argv was
+/// checked against the tool itself on a real host (see the report accompanying
+/// this change); nothing here is guessed.
+pub const PREREQS: &[Prereq] = &[
+    // ---- Rust targets / toolchains (build) ----
+    // The RISC-V and Cortex-M triples are ordinary rustup targets on stable.
+    Prereq {
+        id: "riscv32imc-unknown-none-elf",
+        display: "Rust target riscv32imc-unknown-none-elf",
+        probe: Probe::RustupTarget("riscv32imc-unknown-none-elf"),
+        install: "rustup target add riscv32imc-unknown-none-elf",
+        need: Need::Build,
+        note: None,
+    },
+    Prereq {
+        id: "riscv32imac-unknown-none-elf",
+        display: "Rust target riscv32imac-unknown-none-elf",
+        probe: Probe::RustupTarget("riscv32imac-unknown-none-elf"),
+        install: "rustup target add riscv32imac-unknown-none-elf",
+        need: Need::Build,
+        note: None,
+    },
+    Prereq {
+        id: "thumbv6m-none-eabi",
+        display: "Rust target thumbv6m-none-eabi",
+        probe: Probe::RustupTarget("thumbv6m-none-eabi"),
+        install: "rustup target add thumbv6m-none-eabi",
+        need: Need::Build,
+        note: None,
+    },
+    Prereq {
+        id: "thumbv7em-none-eabihf",
+        display: "Rust target thumbv7em-none-eabihf",
+        probe: Probe::RustupTarget("thumbv7em-none-eabihf"),
+        install: "rustup target add thumbv7em-none-eabihf",
+        need: Need::Build,
+        note: None,
+    },
+    Prereq {
+        id: "thumbv8m.main-none-eabihf",
+        display: "Rust target thumbv8m.main-none-eabihf",
+        probe: Probe::RustupTarget("thumbv8m.main-none-eabihf"),
+        install: "rustup target add thumbv8m.main-none-eabihf",
+        need: Need::Build,
+        note: None,
+    },
+    // Xtensa: NOT a rustup target. `espup install` links an `esp` toolchain
+    // carrying Espressif's Xtensa-enabled rustc; that toolchain is the only way
+    // to build `xtensa-*`.
+    Prereq {
+        id: "xtensa-esp32s3-none-elf",
+        display: "Xtensa `esp` toolchain (for xtensa-esp32s3-none-elf)",
+        probe: Probe::XtensaToolchain("xtensa-esp32s3-none-elf"),
+        install: "cargo install espup --locked && espup install",
+        need: Need::Build,
+        note: Some(
+            "Xtensa is not a rustup target — `rustup target add` cannot provide it; \
+             the `esp` toolchain from espup can",
+        ),
+    },
+    Prereq {
+        id: "xtensa-esp32s3-espidf",
+        display: "Xtensa `esp` toolchain (for xtensa-esp32s3-espidf)",
+        probe: Probe::XtensaToolchain("xtensa-esp32s3-none-elf"),
+        install: "cargo install espup --locked && espup install",
+        need: Need::Build,
+        note: Some(
+            "Xtensa is not a rustup target — `rustup target add` cannot provide it; \
+             the `esp` toolchain from espup can",
+        ),
+    },
+    // The RISC-V ESP `std` targets are NOT rustup targets: esp-idf-template's
+    // `.cargo/config.toml` sets `build-std = ["std", "panic_abort"]` and its
+    // `rust-toolchain.toml` pins `channel = "nightly"` + `components =
+    // ["rust-src"]` (verified by generating one). So the requirement is a
+    // nightly toolchain with rust-src — and notably NOT espup, which the Xtensa
+    // std target does need.
+    Prereq {
+        id: "riscv32imc-esp-espidf",
+        display: "nightly toolchain + rust-src (for riscv32imc-esp-espidf)",
+        probe: Probe::RustupComponent { toolchain: "nightly", component: "rust-src" },
+        install: "rustup toolchain install nightly --component rust-src",
+        need: Need::Build,
+        note: Some(
+            "a build-std target, not a rustup target; the project's rust-toolchain.toml pins \
+             nightly + rust-src, so rustup installs it on the first build too",
+        ),
+    },
+    Prereq {
+        id: "riscv32imac-esp-espidf",
+        display: "nightly toolchain + rust-src (for riscv32imac-esp-espidf)",
+        probe: Probe::RustupComponent { toolchain: "nightly", component: "rust-src" },
+        install: "rustup toolchain install nightly --component rust-src",
+        need: Need::Build,
+        note: Some(
+            "a build-std target, not a rustup target; the project's rust-toolchain.toml pins \
+             nightly + rust-src, so rustup installs it on the first build too",
+        ),
+    },
+    // ---- ESP `std` build tools ----
+    // Directly verified: the generated project's `.cargo/config.toml` sets
+    // `linker = "ldproxy"` for `cfg(target_os = "espidf")`, so EVERY esp-idf
+    // build (Xtensa and RISC-V alike) links through it.
+    Prereq {
+        id: "ldproxy",
+        display: "ldproxy",
+        // `ldproxy` is a linker shim, not a CLI: it exits 101 for every
+        // invocation, `--version` included. Spawn-success is the real signal.
+        probe: Probe::Binary(&["ldproxy", "--version"]),
+        install: "cargo install ldproxy",
+        need: Need::Build,
+        note: None,
+    },
+    // ---- Flashing tools ----
+    Prereq {
+        id: "espflash",
+        display: "espflash",
+        probe: Probe::Binary(&["espflash", "--version"]),
+        install: "cargo install espflash --locked",
+        need: Need::Flash,
+        note: None,
+    },
+    Prereq {
+        id: "probe-rs",
+        display: "probe-rs",
+        probe: Probe::Binary(&["probe-rs", "--version"]),
+        // The CLI ships in the `probe-rs-tools` crate; `probe-rs` itself is the
+        // library.
+        install: "cargo install probe-rs-tools --locked",
+        need: Need::Flash,
+        note: Some("needs an SWD debug probe attached — espflash/UF2 need only the USB-C cable"),
+    },
+    Prereq {
+        id: "picotool",
+        display: "picotool",
+        // `picotool --version` exits 255; the subcommand is `picotool version`.
+        probe: Probe::Binary(&["picotool", "version"]),
+        install: "brew install picotool",
+        need: Need::Flash,
+        note: Some("flashes over USB in BOOTSEL mode (hold B while plugging in) — no probe needed"),
+    },
+    Prereq {
+        id: "hf2",
+        display: "hf2-cli",
+        probe: Probe::Binary(&["hf2", "--version"]),
+        install: "cargo install hf2-cli",
+        need: Need::Flash,
+        note: Some(
+            "talks to the UF2 bootloader over HID (short the RST pads twice) — no probe needed",
+        ),
+    },
+    Prereq {
+        id: "rust-objcopy",
+        display: "rust-objcopy (cargo-binutils)",
+        probe: Probe::Binary(&["rust-objcopy", "--version"]),
+        install: "cargo install cargo-binutils && rustup component add llvm-tools",
+        need: Need::Flash,
+        note: None,
+    },
+    Prereq {
+        id: "uf2conv",
+        display: "uf2conv.py (+ uf2families.json)",
+        probe: Probe::Binary(&["uf2conv.py", "-h"]),
+        install: "curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py \
+                  && curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json \
+                  && chmod +x uf2conv.py   # then put BOTH on PATH",
+        need: Need::Flash,
+        note: Some("uf2conv.py reads uf2families.json from beside itself — both files must be installed"),
+    },
+];
+
+/// Resolve a prerequisite by id. For Rust targets the id is the target triple.
+pub fn prereq(id: &str) -> Option<&'static Prereq> {
+    PREREQS.iter().find(|p| p.id == id)
+}
+
+// --- Per-stack / per-tool prerequisite lists ---
+// These name only the EXTRA prerequisites: the target/toolchain one is always
+// derived from `Stack::target` (whose triple is a `PREREQS` id), so it is never
+// repeated here.
+
+/// esp-hal (ESP no_std): nothing beyond the target/toolchain. The flashing tool
+/// is a live user choice on this stack, so its prerequisites come from the
+/// chosen [`ToolChoice`] rather than from the stack.
+const NO_PREREQS: &[&str] = &[];
+/// ESP `std`: the linker shim every esp-idf build routes through, plus the host
+/// tools esp-idf-sys needs to bootstrap the SDK.
+const ESP_IDF_BUILD_PREREQS: &[&str] = &["ldproxy", "python3", "git"];
+/// The esp-idf template's cargo runner is espflash, and FLASHING is not a live
+/// axis on that stack (the template owns it), so it is stack data here.
+const ESP_FLASH_PREREQS: &[&str] = &["espflash"];
+/// RP2040 / RP2350 over USB (BOOTSEL mass storage). picotool reads the ELF
+/// directly, so no objcopy/UF2 conversion is needed.
+const RP_FLASH_PREREQS: &[&str] = &["picotool"];
+/// nRF52840 over USB (Adafruit nRF52 UF2 bootloader, double-tap RESET): the ELF
+/// must be objcopy'd to a raw binary and then converted to UF2.
+const NRF_FLASH_PREREQS: &[&str] = &["rust-objcopy", "uf2conv"];
+/// SAMD21 over USB (Seeed uf2-samdx1 bootloader): hf2 takes the ELF directly.
+const SAMD_FLASH_PREREQS: &[&str] = &["hf2"];
 
 // --- Per-stack support lists (which universal entries a stack offers) ---
 // esp-hal wires all three categories; the non-ESP scaffold wires the FRAMEWORK

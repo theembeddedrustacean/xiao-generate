@@ -24,7 +24,9 @@ use clap::Parser;
                   name derived from the variant), so `--headless --chip <chip>` alone produces a \
                   working project.\n\n\
                   ESP variants support a no_std esp-hal stack (default) and a std esp-idf stack \
-                  (--stack esp-idf / --std)."
+                  (--stack esp-idf / --std).\n\n\
+                  Generated projects carry rust-analyzer editor configuration: VS Code by default, \
+                  or pick another with --editor (--editor none writes no editor files)."
 )]
 pub struct Cli {
     /// XIAO module variant, e.g. `xiao-esp32s3-sense` (see --list-chips).
@@ -90,6 +92,12 @@ pub struct Cli {
     /// (e.g. `--add-crate heapless --add-crate serde@1.0`). Applies to all stacks.
     #[arg(long = "add-crate", value_name = "SPEC")]
     pub add_crate: Vec<String>,
+
+    /// Editor to emit rust-analyzer configuration for: `vscode` (default),
+    /// `helix`, `neovim`, `zed`, or `none` for no editor files. Applies to all
+    /// stacks.
+    #[arg(long, value_name = "EDITOR")]
+    pub editor: Option<String>,
 
     /// Force the interactive Ratatui TUI (otherwise it launches automatically
     /// when no --chip/--headless/--list-* flag is given and stdout is a

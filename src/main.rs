@@ -96,6 +96,7 @@ fn build_raw(args: &Cli) -> Result<RawConfig, String> {
         logging: args.logging.clone(),
         framework: args.framework.clone(),
         extra_crates: args.add_crate.clone(),
+        editor: args.editor.clone(),
     })
 }
 
@@ -335,6 +336,13 @@ fn print_summary(cfg: &Config) {
         println!("  framework:    {}", cfg.framework.display);
     }
     println!("  µFerris BSP:  {}", uferris_line);
+    // Editor is a universal axis (every stack emits the same file), so it is
+    // always shown. Any caveat travels with it — a config the user still has to
+    // opt into must never read as "done".
+    println!("  editor:       {}", cfg.editor.display);
+    if let Some(caveat) = cfg.editor.caveat {
+        println!("                · {}", caveat);
+    }
     println!("\n  equivalent command:");
     println!("    {}", model::equivalent_command(cfg));
     println!("\nNext steps:");

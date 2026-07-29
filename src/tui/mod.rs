@@ -172,6 +172,8 @@ enum Row {
     Flashing(usize),
     Logging(usize),
     Framework(usize),
+    /// One checkbox in the EDITOR SUPPORT section (index into `registry::EDITORS`).
+    Editor(usize),
     Uferris,
     PowerBoard,
     Async,
@@ -185,6 +187,9 @@ struct App {
     flashing_idx: usize,
     logging_idx: usize,
     framework_idx: usize,
+    /// Selected index into `registry::EDITORS` — a single-select radio list like
+    /// the toolchain sections, with `none` a normal catalog entry.
+    editor_idx: usize,
     uferris_on: bool,
     power_board_on: bool,
     /// µFerris async (embassy). Default ON — the only verified path. Off is a
@@ -219,6 +224,12 @@ impl App {
             flashing_idx: 0,
             logging_idx: 0,
             framework_idx: 0,
+            // The same registry default the CLI uses, so the TUI and a bare
+            // headless run start from an identical selection.
+            editor_idx: registry::EDITORS
+                .iter()
+                .position(|e| e.id == registry::default_editor().id)
+                .unwrap_or(0),
             uferris_on: false,
             power_board_on: false,
             async_on: true,
@@ -359,6 +370,13 @@ impl App {
                 }
             }
         }
+        // EDITOR SUPPORT is live on every stack — the spurious `test`-crate
+        // diagnostic, and its fix, are identical across all three backends — so its
+        // checkboxes are always focusable and nothing here ever greys out. It also
+        // survives µFerris: the BSP owns the toolchain, not the user's editor.
+        for i in 0..registry::EDITORS.len() {
+            rows.push(Row::Editor(i));
+        }
         if self.uferris_enabled() {
             rows.push(Row::Uferris);
         }
@@ -447,6 +465,7 @@ impl App {
             Row::Flashing(i) => self.select_cat(ToolCategory::Flashing, i),
             Row::Logging(i) => self.select_cat(ToolCategory::Logging, i),
             Row::Framework(i) => self.select_cat(ToolCategory::Framework, i),
+            Row::Editor(i) => self.editor_idx = i,
             Row::Uferris => self.toggle_uferris(),
             Row::PowerBoard => self.power_board_on = !self.power_board_on,
             Row::Async => self.async_on = !self.async_on,
@@ -493,6 +512,10 @@ impl App {
             logging,
             framework,
             extra_crates: Vec::new(),
+            // Always forwarded explicitly (`none` included — it is a real catalog
+            // value, not "nothing given"). The axis is live on every stack, so
+            // unlike the toolchain categories there is nothing to suppress here.
+            editor: Some(registry::EDITORS[self.editor_idx].id.to_string()),
         }
     }
 
@@ -563,54 +586,65 @@ fn cycle(idx: usize, delta: isize, len: usize) -> usize {
 /// Colour codes: `.` transparent (the themed panel background shows through),
 /// `o` body orange, `d` dark-red shading, `k` black (eyes/smile), `w` white (glints).
 /// The block's LEADING blanks are significant, so it is centred as a unit with a
-/// uniform left-pad and never re-padded per line. Drawn ONLY when the panel interior
+/// uniform left-pad and never re-padded per line.
+///
+/// FACE ALIGNMENT: the shell, claws and legs are EXACTLY mirror-symmetric about the
+/// block's vertical axis (subpixel column 35.5 of the 72×22 expansion). The face rows
+/// (5..=8) originally sat one whole cell to the RIGHT of that axis — the eyes' and
+/// mouth's ink measured a uniform +2.0-subpixel centroid offset while every other row
+/// measured 0 — which read as a visibly off-centre face. Rows 5..=8 therefore carry the
+/// face block shifted one cell left, so all four face rows now centre on the crab's own
+/// axis; the vacated cells were plain shell (`█`/`▀` in `o`/`d`) and are refilled as
+/// such, so no art is lost. `ferris_face_is_centred_on_the_crab_axis` pins this.
+///
+/// Drawn ONLY when the panel interior
 /// can hold it (≥ `FERRIS_W` wide AND ≥ `FERRIS_H` spare rows below the summary text —
 /// see `draw_summary`); on a narrow/short panel it is omitted entirely rather than
 /// wrapped or clipped.
 const FERRIS_W: usize = 36;
 const FERRIS_H: usize = 11;
 
-/// Per-cell glyphs, embedded verbatim from the V4-B data.
+/// Per-cell glyphs, from the V4-B data (face rows 5..=8 re-centred — see above).
 const FERRIS_GLYPH: [&str; FERRIS_H] = [
     "            ▀▖▘█▀██▀█▝▗▀            ",
     "          ▝▀████████████▀▘          ",
     "▘▖▌█▀   ▝▀████████████████▀▘   ▀█▐▗▝",
     "██▘██▐▗▘████████████████████▝▖▌██▝██",
     "▌████▘▘██████████████████████▝▝████▐",
-    " ▝▖█▝▖█████████▀▖▖██▀▖▖███████▗▘█▗▘ ",
-    "    ▖██████████▄▘███▄▘█████████▗    ",
-    "   ▌█▗▀▀▀██████▝▄▘██▝▄▘████▀▀▀▖█▐   ",
-    "   ▝█▝▄▖▄▄▄▝▀▀▀▀▀▝▀▚▀▀▀▀▘▄▄▄▗▄▘█▘   ",
+    " ▝▖█▝▖████████▀▖▖██▀▖▖████████▗▘█▗▘ ",
+    "    ▖█████████▄▘███▄▘██████████▗    ",
+    "   ▌█▗▀▀▀█████▝▄▘██▝▄▘█████▀▀▀▖█▐   ",
+    "   ▝█▝▄▖▄▄▄▝▀▀▀▀▝▀▚▀▀▀▀▀▘▄▄▄▗▄▘█▘   ",
     "    ▝█▖▖                    ▗▗█▘    ",
     "      ▖                      ▗      ",
 ];
 
-/// Per-cell glyph-ink colour codes, embedded verbatim from the V4-B data.
+/// Per-cell glyph-ink colour codes, matching `FERRIS_GLYPH` cell for cell.
 const FERRIS_FG: [&str; FERRIS_H] = [
     ".............o.o.oo.o.o.............",
     "............oooooooooooo............",
     ".o.o......oooooooooooooooo......o.o.",
     "oo.oo.o.oooooooooooooooooooo.o.oo.oo",
     ".ooooo.oooooooooooooooooooooo.ooooo.",
-    ".o.o..oooooooooowkooowkooooooo..o.o.",
-    ".....ooooooooookwkookwkoooooooo.....",
-    "....odoooooooookokookokooooooodo....",
-    "...oo..d..oooooookodoooooo..d..oo...",
+    ".o.o..ooooooooowkooowkoooooooo..o.o.",
+    ".....oooooooookwkookwkooooooooo.....",
+    "....odooooooookokookokoooooooodo....",
+    "...oo..d..ooooookodooooooo..d..oo...",
     "....ooo......................ooo....",
     "....................................",
 ];
 
-/// Per-cell background colour codes, embedded verbatim from the V4-B data.
+/// Per-cell background colour codes, matching `FERRIS_GLYPH` cell for cell.
 const FERRIS_BG: [&str; FERRIS_H] = [
     "............o.o.o..o.o.o............",
     "..........oo............oo..........",
     "o.o.o...oo................oo...o.o.o",
     "..o..o.o....................o.o..o..",
     "o.....o......................o.....o",
-    "..o.oo.........wko..wko.......oo.o..",
-    "....o..........wk...wk.........o....",
-    "...o.oddd......oko..oko....dddo.o...",
-    ".....od.ddddddddddkkdddddddd.do.....",
+    "..o.oo........wko..wko........oo.o..",
+    "....o.........wk...wk..........o....",
+    "...o.oddd.....oko..oko.....dddo.o...",
+    ".....od.dddddddddkkddddddddd.do.....",
     ".......o....................o.......",
     "......o......................o......",
 ];
@@ -1015,6 +1049,34 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     }
 
+    // ---- EDITOR SUPPORT ----
+    // A radio list like the toolchain sections above, with `none` a normal catalog
+    // entry. It is the one section that is live on EVERY stack — the diagnostic it
+    // configures away is backend-independent — so its header carries no reason and
+    // no row ever greys. Per-editor caveats ride in the hint column, the same place
+    // µFerris puts its eligibility hint.
+    lines.push(Line::from(""));
+    lines.push(heading(theme, "EDITOR SUPPORT"));
+    for (i, e) in registry::EDITORS.iter().enumerate() {
+        let selected = app.editor_idx == i;
+        // Show the caveat only for the editor actually selected — an unselected
+        // row emits nothing, so its caveat does not apply yet.
+        let hint = match e.caveat {
+            Some(c) if selected => c,
+            _ => "",
+        };
+        lines.push(radio_line(
+            theme,
+            focus == Row::Editor(i),
+            selected,
+            false, // never greyed: every editor applies on every stack
+            false, // never inactive
+            "  ",
+            e.display,
+            hint,
+        ));
+    }
+
     // ---- BSP SUPPORT ----
     lines.push(Line::from(""));
     lines.push(heading(theme, "BSP SUPPORT"));
@@ -1120,6 +1182,7 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 None => "no".to_string(),
             };
             lines.push(row("µFerris:", uf));
+            lines.push(row("Editor:", cfg.editor.display.to_string()));
 
             lines.push(Line::from(""));
             lines.push(Line::styled(
@@ -1582,6 +1645,119 @@ mod tests {
         assert!(s.contains("non-async"), "refusal should explain the gap:\n{s}");
     }
 
+    // ---- EDITOR SUPPORT section ----
+
+    /// Index of an editor in the catalog (test helper).
+    fn ed_pos(id: &str) -> usize {
+        registry::EDITORS.iter().position(|e| e.id == id).unwrap()
+    }
+
+    #[test]
+    fn editor_section_renders_the_whole_catalog_with_vscode_preselected() {
+        let s = render(&app_on("xiao-esp32c6", 0), W, H);
+        assert!(s.contains("EDITOR SUPPORT"), "section heading present:\n{s}");
+        for e in registry::EDITORS {
+            assert!(s.contains(e.display), "editor `{}` must be listed:\n{s}", e.display);
+        }
+        // A radio list, styled exactly like the toolchain sections: the registry
+        // default is selected, everything else (including `none`) is an open slot.
+        assert!(s.contains("(•) VS Code"), "VS Code selected by default:\n{s}");
+        assert!(s.contains("( ) Helix"), "Helix offered, unselected:\n{s}");
+        assert!(s.contains("( ) Zed"), "Zed offered, unselected:\n{s}");
+        assert!(s.contains("( ) Neovim"), "Neovim offered, unselected:\n{s}");
+    }
+
+    /// EDITOR is the one section that is live on EVERY stack — the diagnostic it
+    /// fixes is backend-independent — so it must stay focusable and un-greyed
+    /// everywhere, including where all three toolchain sections are dead.
+    #[test]
+    fn editor_section_is_live_on_every_stack_and_under_uferris() {
+        let mut cases: Vec<(&str, usize)> = Vec::new();
+        for (i, v) in registry::VARIANTS.iter().enumerate() {
+            let _ = i;
+            for si in 0..v.stacks.len() {
+                cases.push((v.id, si));
+            }
+        }
+        for (chip, si) in cases {
+            let app = app_on(chip, si);
+            let rows = app.focusable_rows();
+            for e in 0..registry::EDITORS.len() {
+                assert!(
+                    rows.contains(&Row::Editor(e)),
+                    "{chip}/stack{si}: editor row {e} must be focusable"
+                );
+            }
+            let s = render(&app, W, H);
+            assert!(s.contains("EDITOR SUPPORT"), "{chip}/stack{si}: section missing");
+            assert!(!s.contains("(-) VS Code"), "{chip}/stack{si}: editors never grey");
+        }
+
+        // µFerris takes over the toolchain sections, but not the user's editor.
+        let mut uf = app_on("xiao-esp32c3", 0);
+        uf.uferris_on = true;
+        uf.ensure_focus_valid();
+        assert!(
+            uf.focusable_rows().contains(&Row::Editor(ed_pos("vscode"))),
+            "editor rows survive µFerris"
+        );
+        assert!(render(&uf, W, H).contains("(•) VS Code"), "editor selection survives µFerris");
+    }
+
+    #[test]
+    fn selecting_an_editor_updates_the_config_and_the_equivalent_command() {
+        let mut app = app_on("xiao-esp32c6", 0);
+
+        // Single-select: choosing Helix REPLACES the default VS Code.
+        app.focus = Row::Editor(ed_pos("helix"));
+        app.activate();
+        let s = render(&app, W, H);
+        assert!(s.contains("(•) Helix"), "Helix selected after activate:\n{s}");
+        assert!(!s.contains("(•) VS Code"), "VS Code must be deselected:\n{s}");
+        let (cfg, _) = app.resolved().unwrap();
+        assert_eq!(cfg.editor.id, "helix");
+        assert!(flat(&s).contains("--editor helix"), "command carries the editor:\n{s}");
+        assert!(s.contains("Editor:"), "summary shows the editor row:\n{s}");
+        assert!(s.contains("Helix"), "summary lists the choice:\n{s}");
+
+        // `none` is a normal choice on the same list.
+        app.focus = Row::Editor(ed_pos("none"));
+        app.activate();
+        let (cfg, _) = app.resolved().unwrap();
+        assert_eq!(cfg.editor.id, "none");
+        assert!(cfg.editor.path.is_none(), "`none` writes nothing");
+        let s = render(&app, W, H);
+        assert!(s.contains("(•) none"), "none selectable on the editor list:\n{s}");
+        assert!(flat(&s).contains("--editor none"), "command carries --editor none:\n{s}");
+
+        // …and back to the default, which drops the flag again.
+        app.focus = Row::Editor(ed_pos("vscode"));
+        app.activate();
+        let (cfg, _) = app.resolved().unwrap();
+        assert_eq!(model::equivalent_command(&cfg), "xiao-generate --chip xiao-esp32c6");
+    }
+
+    /// Neovim's file needs `exrc` + `:trust`, so the TUI must say so rather than
+    /// imply selecting it is enough. The caveat shows only once that editor is
+    /// actually selected (an unselected row emits nothing).
+    #[test]
+    fn neovim_caveat_is_surfaced_only_while_it_is_selected() {
+        let mut app = app_on("xiao-esp32c6", 0);
+        let s = render(&app, W, H);
+        assert!(!s.contains("exrc"), "no caveat while Neovim is unselected:\n{s}");
+
+        app.focus = Row::Editor(ed_pos("neovim"));
+        app.activate();
+        let s = render(&app, W, H);
+        assert!(s.contains("(•) Neovim"), "Neovim selected:\n{s}");
+        assert!(s.contains("exrc"), "caveat shown once Neovim is selected:\n{s}");
+        // …and it is the registry's caveat, not TUI-local prose.
+        assert!(
+            registry::editor("neovim").unwrap().caveat.is_some(),
+            "the caveat must come from the registry"
+        );
+    }
+
     #[test]
     fn summary_has_no_esp_vocabulary_or_removed_lines() {
         let s = render(&app_on("xiao-esp32c6", 0), W, H);
@@ -1733,6 +1909,208 @@ mod tests {
         assert!(g.len() > 200, "crab shown even on the gated page (got {} cells)", g.len());
     }
 
+    // -----------------------------------------------------------------------
+    // Ferris, measured at SUBPIXEL resolution. Every quadrant glyph packs a 2×2
+    // grid of subpixels, so a cell-level comparison cannot see a wrong glyph or a
+    // half-cell displacement. These three tests expand both the art and the real
+    // rendered buffer to that 2× grid and compare there.
+    // -----------------------------------------------------------------------
+
+    /// Every glyph the crab's art — and `ferris_complement`'s substitutions — can
+    /// produce: the quadrant set (U+2596..U+259F), `▀▄▌▐█`, and the blank cell.
+    const BLOCKS: [char; 16] =
+        [' ', '█', '▀', '▄', '▌', '▐', '▘', '▝', '▖', '▗', '▙', '▛', '▜', '▟', '▚', '▞'];
+
+    /// A block glyph's 2×2 subpixel coverage as `[UL, UR, LL, LR]` — the ground truth
+    /// the crab is measured against, written out per glyph rather than derived from
+    /// the code points so a transposed pair cannot cancel itself out.
+    fn coverage(g: char) -> [bool; 4] {
+        match g {
+            ' ' => [false, false, false, false],
+            '█' => [true, true, true, true],
+            '▀' => [true, true, false, false],
+            '▄' => [false, false, true, true],
+            '▌' => [true, false, true, false],
+            '▐' => [false, true, false, true],
+            '▘' => [true, false, false, false],
+            '▝' => [false, true, false, false],
+            '▖' => [false, false, true, false],
+            '▗' => [false, false, false, true],
+            '▙' => [true, false, true, true],
+            '▛' => [true, true, true, false],
+            '▜' => [true, true, false, true],
+            '▟' => [false, true, true, true],
+            '▚' => [true, false, false, true],
+            '▞' => [false, true, true, false],
+            other => panic!("{other:?} is not a block glyph the crab can be painted with"),
+        }
+    }
+
+    /// `Some(ink)` for one of the crab's four fixed inks, `None` for anything else —
+    /// i.e. the themed panel showing through. The crab never paints a theme colour, so
+    /// this cleanly separates "crab" from "background" in a rendered cell.
+    fn crab_ink(c: Color) -> Option<Color> {
+        (c == FERRIS_ORANGE || c == FERRIS_DARK || c == FERRIS_BLACK || c == FERRIS_WHITE)
+            .then_some(c)
+    }
+
+    /// The art expanded to its `FERRIS_W*2` × `FERRIS_H*2` subpixel grid: for each
+    /// cell the glyph decides, quadrant by quadrant, whether that subpixel shows the
+    /// ink (`FERRIS_FG`) or the background (`FERRIS_BG`).
+    fn art_subpixels() -> Vec<Vec<Option<Color>>> {
+        let mut grid = vec![vec![None; FERRIS_W * 2]; FERRIS_H * 2];
+        for r in 0..FERRIS_H {
+            let fg = FERRIS_FG[r].as_bytes();
+            let bg = FERRIS_BG[r].as_bytes();
+            for (c, ch) in FERRIS_GLYPH[r].chars().enumerate() {
+                let (ink, back) = (ferris_ink(fg[c]), ferris_ink(bg[c]));
+                for (q, on) in coverage(ch).iter().enumerate() {
+                    grid[r * 2 + q / 2][c * 2 + q % 2] = if *on { ink } else { back };
+                }
+            }
+        }
+        grid
+    }
+
+    /// Subpixel columns on row `y` carrying FACE ink — black pupils or white glints.
+    /// Shell, claws and legs use only orange and dark red, so these are exactly the
+    /// crab's eye and mouth subpixels.
+    fn face_cols(grid: &[Vec<Option<Color>>], y: usize) -> Vec<usize> {
+        grid[y]
+            .iter()
+            .enumerate()
+            .filter(|&(_, p)| matches!(p, Some(c) if *c == FERRIS_BLACK || *c == FERRIS_WHITE))
+            .map(|(x, _)| x)
+            .collect()
+    }
+
+    /// `ferris_complement` must cover EXACTLY the subpixels its argument does not.
+    /// The quadrant complements are easy to get wrong (`▘`↔`▟`, `▖`↔`▜`, `▝`↔`▙`,
+    /// `▗`↔`▛`), and a single bad pair silently misplaces every transparent-ink cell
+    /// in the crab — so check all four quadrants of all sixteen glyphs.
+    #[test]
+    fn ferris_complement_is_the_exact_inverse_of_every_block_glyph() {
+        for g in BLOCKS {
+            let comp = ferris_complement(g);
+            let (a, b) = (coverage(g), coverage(comp));
+            for q in 0..4 {
+                assert_ne!(
+                    a[q], b[q],
+                    "complement({g:?}) = {comp:?}, but quadrant {q} is {} in both — \
+                     they are not complements",
+                    if a[q] { "set" } else { "clear" }
+                );
+            }
+            assert_eq!(ferris_complement(comp), g, "complement({g:?}) must be an involution");
+        }
+    }
+
+    /// The crab the terminal actually shows must equal the art subpixel for subpixel.
+    /// Expands every cell of the REAL rendered buffer through its own glyph (including
+    /// the complement substitutions) and diffs it against `art_subpixels`; anything
+    /// but zero means the renderer is not painting what the tables say.
+    #[test]
+    fn ferris_render_is_subpixel_exact() {
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
+        let (iw, _) = summary_interior(W, H);
+        let x0 = summary_ix(W, H) as usize + (iw as usize - FERRIS_W) / 2;
+        let y0 = crab_cells(&buf).iter().map(|c| c.1).min().unwrap() as usize;
+
+        let want = art_subpixels();
+        let mut bad: Vec<(usize, usize, Option<Color>, Option<Color>)> = Vec::new();
+        for r in 0..FERRIS_H {
+            for c in 0..FERRIS_W {
+                let cell = buf
+                    .cell(((x0 + c) as u16, (y0 + r) as u16))
+                    .expect("the whole crab box lies inside the rendered buffer");
+                let mut chars = cell.symbol().chars();
+                let g = chars.next().unwrap_or(' ');
+                assert!(chars.next().is_none(), "crab cell ({c},{r}) must be one glyph wide");
+                for (q, on) in coverage(g).iter().enumerate() {
+                    let got = crab_ink(if *on { cell.fg } else { cell.bg });
+                    let (sx, sy) = (c * 2 + q % 2, r * 2 + q / 2);
+                    if got != want[sy][sx] {
+                        bad.push((sx, sy, want[sy][sx], got));
+                    }
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} rendered subpixel(s) differ from the art; first few (x, y, want, got): {:?}",
+            bad.len(),
+            &bad[..bad.len().min(6)]
+        );
+    }
+
+    /// The crab's face must sit on the crab's own axis of symmetry.
+    ///
+    /// The regression this pins: the shell, claws and legs are exactly mirror-symmetric,
+    /// but the face rows once sat one whole character cell to the RIGHT of that axis —
+    /// every eye row's ink measured a +2.0-subpixel centroid offset and the eye pair's
+    /// bounding box missed its mirror by 4 subpixels, which reads as a visibly
+    /// off-centre face.
+    #[test]
+    fn ferris_face_is_centred_on_the_crab_axis() {
+        let grid = art_subpixels();
+        let w = FERRIS_W * 2;
+        let axis = (w - 1) as f64 / 2.0;
+
+        // (1) Body integrity: every row WITHOUT face ink is exactly mirror-symmetric,
+        // which is what makes `axis` the crab's real axis rather than an assumption.
+        let mut body_rows = 0;
+        for y in 0..FERRIS_H * 2 {
+            if !face_cols(&grid, y).is_empty() {
+                continue;
+            }
+            body_rows += 1;
+            for x in 0..w {
+                assert_eq!(
+                    grid[y][x],
+                    grid[y][w - 1 - x],
+                    "body subpixel ({x},{y}) does not mirror onto ({},{y})",
+                    w - 1 - x
+                );
+            }
+        }
+        assert_eq!(body_rows, 15, "15 of the 22 subpixel rows are pure body");
+
+        // (2) Each row of face ink is centred on that axis. A run of odd width cannot
+        // straddle an even-width grid exactly, so half a subpixel is the arithmetic
+        // floor — anything beyond it is a real displacement.
+        let mut face_rows = 0;
+        for y in 0..FERRIS_H * 2 {
+            let cols = face_cols(&grid, y);
+            if cols.is_empty() {
+                continue;
+            }
+            face_rows += 1;
+            let centroid = cols.iter().sum::<usize>() as f64 / cols.len() as f64;
+            assert!(
+                (centroid - axis).abs() <= 0.5,
+                "face ink on subpixel row {y} is {:+.1} off the crab's axis \
+                 (centroid {centroid:.1}, axis {axis:.1})",
+                centroid - axis
+            );
+        }
+        assert_eq!(face_rows, 7, "the face spans 7 subpixel rows (5 of eyes, 2 of mouth)");
+
+        // (3) The face as a whole is mirror-placed: its bounding box's left and right
+        // edges are equidistant from the axis, so `lo + hi == w - 1`. This is placement
+        // only — the eyes' INTERIORS are deliberately not mirrored (both glints sit on
+        // the same side, as in the logo), so it cannot be satisfied by restyling.
+        let all: Vec<usize> = (0..FERRIS_H * 2).flat_map(|y| face_cols(&grid, y)).collect();
+        let (lo, hi) = (*all.iter().min().unwrap(), *all.iter().max().unwrap());
+        assert_eq!(
+            lo + hi,
+            w - 1,
+            "the face's bounding box [{lo}, {hi}] is not centred on the crab's axis \
+             (it would have to mirror onto [{}, {}])",
+            w - 1 - hi,
+            w - 1 - lo
+        );
+    }
+
     /// Page width whose Summary interior is 35 — one column under `FERRIS_W` (36),
     /// so it exercises the width guard right at its boundary.
     const NARROW_W: u16 = 88;
@@ -1875,6 +2253,39 @@ mod tests {
                         let (kr, kg, kb) = rgb(cell.bg);
                         println!("{x} {y} {} {fr} {fg} {fb} {kr} {kg} {kb}", cell.symbol());
                     }
+                }
+            }
+        }
+    }
+
+    /// Not run in the normal suite; dumps the crab's WHOLE `FERRIS_W`×`FERRIS_H` box
+    /// from the real buffer — blank cells included, and with unset colours reported as
+    /// `-` rather than collapsed to black — so an external tool can expand every cell
+    /// to its 2×2 subpixels and diff it against the art:
+    ///   cargo test --bin xiao-generate -- --ignored --nocapture dump_ferris_region
+    #[test]
+    #[ignore]
+    fn dump_ferris_region() {
+        let col = |c: Color| -> String {
+            match c {
+                Color::Rgb(r, g, b) => format!("{r},{g},{b}"),
+                _ => "-".to_string(),
+            }
+        };
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
+        let cells = crab_cells(&buf);
+        let x0 = cells.iter().map(|c| c.0).min().unwrap();
+        let y0 = cells.iter().map(|c| c.1).min().unwrap();
+        println!("ORIGIN {x0} {y0}");
+        for dy in 0..FERRIS_H as u16 {
+            for dx in 0..FERRIS_W as u16 {
+                if let Some(cell) = buf.cell((x0 + dx, y0 + dy)) {
+                    println!(
+                        "{dx} {dy} [{}] {} {}",
+                        cell.symbol(),
+                        col(cell.fg),
+                        col(cell.bg)
+                    );
                 }
             }
         }

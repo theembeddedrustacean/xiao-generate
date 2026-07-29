@@ -174,6 +174,10 @@ fn snapshot_c3_base_leaves_esp_generate_main_intact() {
     assert!(toml.contains("esp-hal"));
     // -o esp-backtrace pulls esp-println into the scaffold
     assert!(toml.contains("esp-println"), "Cargo.toml:\n{toml}");
+
+    // esp-generate emits editor config only under its per-editor `-o` options
+    // (which we do not pass), so we supply the editor-agnostic file ourselves.
+    assert_rust_analyzer_config(&out, "esp-hal no_std");
 }
 
 #[test]
@@ -370,6 +374,16 @@ fn snapshot_c3_esp_idf_std_hello() {
     assert!(main.contains("Hello from xiao-generate"), "main.rs:\n{main}");
     assert!(main.contains("EspLogger::initialize_default"));
     assert!(!main.contains("PinDriver"), "C3 hello must not blink an LED");
+
+    // The esp-idf stack looks hosted, but its `.cargo/config.toml` sets
+    // `build-std = ["std", "panic_abort"]` — no `test` — so it needs the config
+    // exactly like the bare-metal stacks do.
+    assert!(
+        cfg.contains("build-std"),
+        "expectation is premised on build-std; .cargo/config.toml:\n{cfg}"
+    );
+    assert!(!cfg.contains("\"test\""), "if build-std gained `test`, revisit:\n{cfg}");
+    assert_rust_analyzer_config(&out, "esp-idf std");
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +449,246 @@ fn non_esp_scaffold_writes_the_full_project_tree() {
         assert!(toml.contains("[profile.release]"), "{chip}/{stack}:\n{toml}");
         assert!(!toml.contains("profile = {"), "{chip}/{stack}: inline profile:\n{toml}");
     }
+}
+
+/// Assert a generated project carries the editor config that suppresses the
+/// spurious `can't find crate for `test`` diagnostic. Shared by the non-ESP and
+/// ESP checks below because the requirement is backend-independent.
+fn assert_rust_analyzer_config(out: &Path, what: &str) {
+    // 1. The editor-agnostic file, in rust-analyzer.toml's un-prefixed, nested
+    //    form. Keys are the ones `rust-analyzer --print-config-schema` documents.
+    let path = out.join("rust-analyzer.toml");
+    assert!(path.exists(), "{what}: missing rust-analyzer.toml");
+    let s = std::fs::read_to_string(&path).unwrap();
+    assert!(s.contains("[cargo]"), "{what}: no [cargo] table:\n{s}");
+    assert!(s.contains("[check]"), "{what}: no [check] table:\n{s}");
+    assert_eq!(
+        s.matches("allTargets = false").count(),
+        2,
+        "{what}: expected both cargo.allTargets and check.allTargets to be false:\n{s}"
+    );
+
+    // 2. The VS Code client-config file — the delivery path actually verified to
+    //    suppress the diagnostic (rust-analyzer.toml alone does not, as of 1.97.1).
+    let vs = out.join(".vscode/settings.json");
+    assert!(vs.exists(), "{what}: missing .vscode/settings.json");
+    let v = std::fs::read_to_string(&vs).unwrap();
+    assert!(
+        v.contains("\"rust-analyzer.cargo.allTargets\": false"),
+        "{what}: settings.json must disable cargo.allTargets:\n{v}"
+    );
+    assert!(
+        v.contains("\"rust-analyzer.check.allTargets\": false"),
+        "{what}: settings.json must disable check.allTargets:\n{v}"
+    );
+    // Client config is JSON, and a trailing comma (which esp-generate's own
+    // settings.json happens to carry) is not valid strict JSON.
+    assert!(!v.contains(",\n}"), "{what}: trailing comma in settings.json:\n{v}");
+}
+
+/// EVERY generated bare-metal project must ship the rust-analyzer config —
+/// rust-analyzer's default `--all-targets` builds a test target, `test` does not
+/// exist for these targets, and the user sees `E0463` on a project that builds
+/// fine. This covers the whole non-ESP matrix; the ESP stacks are covered in
+/// their own snapshots (which need their generators on PATH).
+#[test]
+fn non_esp_projects_ship_rust_analyzer_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (chip, stack, framework, _) in NON_ESP_CELLS {
+        let out = tmp.path().join(format!("{chip}-{stack}-{framework}"));
+        generate_cell(chip, stack, framework, &out);
+        assert_rust_analyzer_config(&out, &format!("{chip}/{stack}/{framework}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Universal editor support (`--editor`). The files are written by the backend
+// DISPATCHER, so this behaviour is backend-independent — these tests use the
+// non-ESP scaffold because it needs no external generator, and
+// `editor_files_are_backend_independent` re-checks one on each ESP stack too.
+// ---------------------------------------------------------------------------
+
+/// Every editor's file, and the exact key spelling that must appear in it. A
+/// mis-spelled key is silently ignored by the editor, so the whole feature fails
+/// invisibly — which is precisely what these literals pin.
+const EDITOR_FILES: &[(&str, &str, &[&str])] = &[
+    (
+        "vscode",
+        ".vscode/settings.json",
+        &[
+            "\"rust-analyzer.cargo.allTargets\": false",
+            "\"rust-analyzer.check.allTargets\": false",
+        ],
+    ),
+    (
+        "helix",
+        ".helix/languages.toml",
+        &[
+            "[language-server.rust-analyzer.config]",
+            "cargo.allTargets = false",
+            "check.allTargets = false",
+        ],
+    ),
+    (
+        "zed",
+        ".zed/settings.json",
+        &["\"initialization_options\"", "\"allTargets\": false"],
+    ),
+    (
+        "neovim",
+        ".nvim.lua",
+        &["vim.lsp.config(\"rust_analyzer\"", "allTargets = false"],
+    ),
+];
+
+#[test]
+fn each_editor_emits_its_own_file_with_the_right_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (id, path, needles) in EDITOR_FILES {
+        let out = tmp.path().join(format!("ed-{id}"));
+        let mut c = bin();
+        c.args(["--chip", "xiao-rp2040", "--editor", id, "-o", out.to_str().unwrap()]);
+        assert!(c.output().unwrap().status.success(), "--editor {id} should generate");
+
+        let f = out.join(path);
+        assert!(f.exists(), "--editor {id} must write {path}");
+        let s = std::fs::read_to_string(&f).unwrap();
+        for n in *needles {
+            assert!(s.contains(n), "--editor {id}: {path} missing `{n}`:\n{s}");
+        }
+        // The editor-agnostic file rides along whenever any editor is selected.
+        assert!(out.join("rust-analyzer.toml").exists(), "--editor {id}: rust-analyzer.toml");
+
+        // …and no OTHER editor's file is written.
+        for (other, other_path, _) in EDITOR_FILES {
+            if other != id {
+                assert!(
+                    !out.join(other_path).exists(),
+                    "--editor {id} must not write {other}'s {other_path}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn summary_reports_the_editor_and_the_neovim_caveat() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("nvim");
+    let res = bin()
+        .args(["--chip", "xiao-rp2040", "--editor", "neovim", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(res.status.success());
+    let s = String::from_utf8_lossy(&res.stdout);
+    assert!(s.contains("editor:"), "summary must report the editor:\n{s}");
+    assert!(s.contains("Neovim"), "summary must name the editor:\n{s}");
+    assert!(s.contains("exrc"), "summary must surface the Neovim caveat:\n{s}");
+    // The equivalent command round-trips the choice.
+    assert!(s.contains("--editor neovim"), "command must carry the editor:\n{s}");
+}
+
+/// `--editor` takes exactly ONE value: a second occurrence is a clap usage error,
+/// not a silently-merged selection.
+#[test]
+fn editor_flag_is_not_repeatable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("dup");
+    let res = bin()
+        .args([
+            "--chip", "xiao-rp2040", "--editor", "helix", "--editor", "zed",
+            "-o", out.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!res.status.success(), "a repeated --editor must be rejected");
+    assert!(!out.exists(), "nothing must be written for a rejected invocation");
+}
+
+#[test]
+fn editor_none_writes_no_editor_files_at_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("none");
+    let mut c = bin();
+    c.args(["--chip", "xiao-rp2040", "--editor", "none", "-o", out.to_str().unwrap()]);
+    assert!(c.output().unwrap().status.success());
+
+    // Not even the editor-agnostic file: `none` means "no editor config".
+    assert!(!out.join("rust-analyzer.toml").exists(), "--editor none must not write rust-analyzer.toml");
+    for (id, path, _) in EDITOR_FILES {
+        assert!(!out.join(path).exists(), "--editor none must not write {id}'s {path}");
+    }
+    // The project itself is still complete.
+    assert!(out.join("Cargo.toml").exists(), "the project is still generated");
+    assert!(out.join("src/main.rs").exists());
+}
+
+/// The no-regression guarantee: with NO `--editor` flag, a generated project must
+/// still carry the VS Code client config that clears the spurious `test`-crate
+/// error. This is the behaviour every project has always had.
+#[test]
+fn default_still_emits_the_working_vscode_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("default");
+    generate_cell("xiao-rp2040", "rp2040-hal", "none", &out);
+    assert_rust_analyzer_config(&out, "default (no --editor)");
+    // …and only VS Code's file — the other editors are opt-in.
+    for (id, path, _) in EDITOR_FILES {
+        if *id != "vscode" {
+            assert!(!out.join(path).exists(), "default must not write {id}'s {path}");
+        }
+    }
+}
+
+/// The dispatcher writes these for every backend, so the same `--editor helix`
+/// must land identically on the ESP stacks too (they self-skip without their
+/// generators, exactly like the other ESP snapshots).
+#[test]
+fn editor_files_are_backend_independent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cases: &[(&str, &[&str], bool)] = &[
+        ("esp-hal", &["--chip", "xiao-esp32c3"], esp_generate_available()),
+        ("esp-idf", &["--chip", "xiao-esp32c3", "--std"], cargo_generate_available()),
+        ("non-esp", &["--chip", "xiao-rp2040"], true),
+    ];
+    for (label, args, available) in cases {
+        if !available {
+            eprintln!("skipping {label}: generator not installed");
+            continue;
+        }
+        let out = tmp.path().join(format!("be-{label}"));
+        let mut c = bin();
+        c.args(*args).args(["--editor", "helix", "-o", out.to_str().unwrap()]);
+        assert!(c.output().unwrap().status.success(), "{label} should generate");
+
+        let f = out.join(".helix/languages.toml");
+        assert!(f.exists(), "{label}: missing .helix/languages.toml");
+        let s = std::fs::read_to_string(&f).unwrap();
+        assert!(s.contains("[language-server.rust-analyzer.config]"), "{label}:\n{s}");
+        assert_eq!(
+            s.matches("allTargets = false").count(),
+            2,
+            "{label}: both cargo and check must be disabled:\n{s}"
+        );
+        // VS Code's file is NOT written when it was not asked for, on any backend.
+        assert!(!out.join(".vscode/settings.json").exists(), "{label}: vscode not selected");
+    }
+}
+
+#[test]
+fn unknown_editor_is_a_config_error_before_generation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("bad");
+    let res = bin()
+        .args(["--chip", "xiao-rp2040", "--editor", "emacs", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(res.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(err.contains("unknown --editor"), "stderr: {err}");
+    // The message lists the whole catalog, `none` included.
+    assert!(err.contains("vscode") && err.contains("none"), "stderr: {err}");
+    assert!(!out.exists(), "nothing must be written for a rejected selection");
 }
 
 /// Cargo looks config keys up by splitting on `.`, so a target triple with a dot
@@ -647,4 +901,232 @@ fn llvm_nm() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// THE nRF52840 BRICK GUARD.
+//
+// A stock XIAO nRF52840 / nRF52840 Sense ships the Adafruit nRF52 UF2
+// bootloader with SoftDevice S140 v7. That leaves the application exactly one
+// window of flash, and the regions on either side of it are not recoverable
+// over USB — putting them back needs an SWD probe. So a generated project whose
+// `memory.x` drifts back to the flat `ORIGIN = 0x0` layout produces firmware
+// that destroys the board's bootloader the moment it is UF2-flashed.
+//
+// The layout below is sourced in `src/templates/files/memory_nrf52840.x`
+// (Zephyr's `xiao_ble` partition map + Adafruit's own bootloader linker
+// script); these two tests are what keep the generator honest about it.
+// ---------------------------------------------------------------------------
+
+/// Where the application must start. The MBR + SoftDevice S140 7.3.0 own
+/// everything below it, and the bootloader jumps to exactly this address
+/// (`SD_SIZE_GET(MBR_SIZE)`), so it is not merely a floor.
+const NRF_APP_FLASH_ORIGIN: u64 = 0x0002_7000;
+/// One past the last byte the UF2 bootloader will write: `USER_FLASH_END =
+/// BOOTLOADER_REGION_START (0xF4000) - DFU_APP_DATA_RESERVED (40K)`. Blocks
+/// outside it are dropped, so an image that runs past here is flashed truncated.
+const NRF_UF2_USER_FLASH_END: u64 = 0x000E_A000;
+/// The MBR forwards every interrupt through a pointer it keeps in the lowest
+/// bytes of RAM, so the application's RAM may not start at 0x20000000.
+const NRF_APP_RAM_ORIGIN: u64 = 0x2000_0008;
+/// One past the last byte of the nRF52840's 256 KiB of RAM.
+const NRF_RAM_END: u64 = 0x2004_0000;
+
+/// Strip `/* … */` comments, so prose that mentions FLASH, RAM or ORIGIN — and
+/// `memory_nrf52840.x`'s header comment mentions all three, including the
+/// bootloader's own `ORIGIN 0xF4000` — can never be parsed as the real MEMORY
+/// block.
+fn strip_block_comments(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find("/*") {
+        out.push_str(&rest[..open]);
+        match rest[open..].find("*/") {
+            Some(close) => rest = &rest[open + close + 2..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Evaluate one linker-script size expression: `+`/`-` over hex or decimal
+/// literals with an optional `K`/`M` suffix. That is the whole grammar our
+/// `memory.x` bodies use (`0x00027000`, `788K`, `256K - 8`), and evaluating it
+/// rather than string-matching is the point — the test asserts where the image
+/// lands, not how the script happens to spell it.
+fn eval_linker_expr(expr: &str) -> u64 {
+    fn term(t: &str) -> u64 {
+        let t = t.trim();
+        let (digits, scale) = match t.chars().last() {
+            Some('K' | 'k') => (&t[..t.len() - 1], 1024),
+            Some('M' | 'm') => (&t[..t.len() - 1], 1024 * 1024),
+            _ => (t, 1),
+        };
+        let digits = digits.trim();
+        let parsed = match digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => digits.parse::<u64>(),
+        };
+        parsed.unwrap_or_else(|_| panic!("memory.x: cannot evaluate term `{t}`")) * scale
+    }
+
+    let mut total: i64 = 0;
+    let mut sign: i64 = 1;
+    let mut current = String::new();
+    for ch in expr.chars() {
+        if ch == '+' || ch == '-' {
+            total += sign * term(&current) as i64;
+            sign = if ch == '+' { 1 } else { -1 };
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+    total += sign * term(&current) as i64;
+    u64::try_from(total).unwrap_or_else(|_| panic!("memory.x: `{expr}` evaluated negative"))
+}
+
+/// `(origin, length)` of one region of a `memory.x` MEMORY block.
+fn memory_region(script: &str, region: &str) -> (u64, u64) {
+    let script = strip_block_comments(script);
+    for line in script.lines() {
+        let line = line.trim().trim_end_matches(',');
+        let Some(rest) = line.strip_prefix(region) else { continue };
+        let Some(rest) = rest.trim_start().strip_prefix(':') else { continue };
+        let (origin, length) = rest
+            .split_once("LENGTH")
+            .unwrap_or_else(|| panic!("memory.x: no LENGTH in `{line}`"));
+        let origin = origin
+            .split_once('=')
+            .unwrap_or_else(|| panic!("memory.x: no ORIGIN `=` in `{line}`"))
+            .1
+            .trim_end()
+            .trim_end_matches(',');
+        let length = length
+            .split_once('=')
+            .unwrap_or_else(|| panic!("memory.x: no LENGTH `=` in `{line}`"))
+            .1;
+        return (eval_linker_expr(origin), eval_linker_expr(length));
+    }
+    panic!("memory.x: no `{region}` region in:\n{script}");
+}
+
+/// BRICK GUARD, generation half — runs unconditionally, no toolchain needed.
+///
+/// Every generated nRF52840 project must place FLASH inside the one window the
+/// stock bootloader leaves free, and must keep its hands off the bottom of RAM
+/// (the MBR forwards interrupts through a pointer it keeps there, so an
+/// application that allocates over it loses every interrupt on the board).
+#[test]
+fn nrf52840_memory_x_stays_clear_of_the_bootloader_and_softdevice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut checked = 0;
+    for (chip, stack, framework, _) in NON_ESP_CELLS {
+        if !chip.starts_with("xiao-nrf52840") {
+            continue;
+        }
+        let cell = format!("{chip}/{stack}/{framework}");
+        let out = tmp.path().join(format!("{chip}-{stack}-{framework}"));
+        generate_cell(chip, stack, framework, &out);
+        let script = std::fs::read_to_string(out.join("memory.x"))
+            .unwrap_or_else(|e| panic!("{cell}: no memory.x ({e})"));
+
+        let (flash_origin, flash_len) = memory_region(&script, "FLASH");
+        assert!(
+            flash_origin >= NRF_APP_FLASH_ORIGIN,
+            "{cell}: FLASH ORIGIN {flash_origin:#x} is inside the MBR + SoftDevice S140 v7 \
+             region (below {NRF_APP_FLASH_ORIGIN:#x}). Firmware linked there, UF2-flashed to a \
+             stock XIAO, overwrites the bootloader — recovery needs an SWD probe.\n{script}"
+        );
+        assert_eq!(
+            flash_origin, NRF_APP_FLASH_ORIGIN,
+            "{cell}: FLASH ORIGIN {flash_origin:#x} is not where the bootloader jumps. It \
+             branches to SD_SIZE_GET(MBR_SIZE), which S140 7.3.0 reports as \
+             {NRF_APP_FLASH_ORIGIN:#x} — an image linked anywhere else simply never starts.\
+             \n{script}"
+        );
+        assert!(
+            flash_origin + flash_len <= NRF_UF2_USER_FLASH_END,
+            "{cell}: FLASH runs to {:#x}, past USER_FLASH_END ({NRF_UF2_USER_FLASH_END:#x}). \
+             The UF2 bootloader drops every block at or above that, so an image this size is \
+             flashed with its tail silently missing.\n{script}",
+            flash_origin + flash_len
+        );
+        // A vector table needs 0x100 alignment on this part (16 exceptions + 48
+        // IRQs = 256 bytes), and it sits at ORIGIN(FLASH).
+        assert_eq!(flash_origin % 0x100, 0, "{cell}: FLASH ORIGIN {flash_origin:#x} misaligned");
+
+        let (ram_origin, ram_len) = memory_region(&script, "RAM");
+        assert!(
+            ram_origin >= NRF_APP_RAM_ORIGIN,
+            "{cell}: RAM ORIGIN {ram_origin:#x} overlaps the MBR's interrupt-forwarding \
+             pointer (must be at least {NRF_APP_RAM_ORIGIN:#x})\n{script}"
+        );
+        assert!(
+            ram_origin + ram_len <= NRF_RAM_END,
+            "{cell}: RAM runs past the end of the nRF52840's 256 KiB\n{script}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no nRF52840 cells in NON_ESP_CELLS — did the matrix lose them?");
+}
+
+/// ELF32 `e_entry`: the little-endian word at file offset 24. Deliberately the
+/// same read `scripts/matrix.sh`'s flashing safety gate performs before it will
+/// write an image to a board, so the test and the gate cannot disagree.
+fn elf_entry(elf: &Path) -> u64 {
+    let bytes = std::fs::read(elf).unwrap_or_else(|e| panic!("read {}: {e}", elf.display()));
+    assert!(bytes.len() > 28, "{}: too short to be an ELF", elf.display());
+    assert_eq!(&bytes[..4], b"\x7fELF", "{}: not an ELF", elf.display());
+    assert_eq!(bytes[4], 1, "{}: expected a 32-bit ELF", elf.display());
+    u64::from(u32::from_le_bytes(bytes[24..28].try_into().unwrap()))
+}
+
+/// BRICK GUARD, linked-image half. The generation test above proves the
+/// *script* is right; this proves the *linker honoured it*. A `memory.x` that is
+/// never picked up (dropped `build.rs`, dropped `-Tlink.x`) links happily to a
+/// low entry point, which is the exact image that destroys the bootloader.
+#[test]
+#[ignore = "opt-in: set XIAO_COMPILE_GATE=1 (downloads and builds every HAL)"]
+fn compile_gate_nrf52840_firmware_links_above_the_bootloader_region() {
+    if !compile_gate_enabled() {
+        eprintln!("skipping: set XIAO_COMPILE_GATE=1 to run the compile gate");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    for (chip, stack, framework, target) in NON_ESP_CELLS {
+        if !chip.starts_with("xiao-nrf52840") {
+            continue;
+        }
+        if !target_installed(target) {
+            eprintln!("skipping {chip}/{stack}/{framework}: target {target} not installed");
+            continue;
+        }
+        let name = format!("{chip}-{stack}-{framework}");
+        let out = tmp.path().join(&name);
+        generate_cell(chip, stack, framework, &out);
+
+        let build = Command::new("cargo").arg("build").current_dir(&out).output().expect("cargo");
+        assert!(
+            build.status.success(),
+            "{name} failed to build:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let elf = out.join("target").join(target).join("debug").join(&name);
+        let entry = elf_entry(&elf);
+        assert!(
+            entry >= NRF_APP_FLASH_ORIGIN,
+            "{name}: entry point {entry:#010x} is below {NRF_APP_FLASH_ORIGIN:#x}. This image \
+             cannot be UF2-flashed to a stock XIAO nRF52840: written where it is linked it \
+             overwrites the MBR + SoftDevice + bootloader (recovery needs an SWD probe), and \
+             relocated to {NRF_APP_FLASH_ORIGIN:#x} every absolute address in it is wrong."
+        );
+        assert!(
+            entry < NRF_UF2_USER_FLASH_END,
+            "{name}: entry point {entry:#010x} is past USER_FLASH_END \
+             ({NRF_UF2_USER_FLASH_END:#x}) — outside the window the UF2 bootloader will write"
+        );
+    }
 }

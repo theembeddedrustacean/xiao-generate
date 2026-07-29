@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::registry::{self, Backend, Stack, ToolCategory, ToolChoice, Variant};
+use crate::registry::{self, Backend, Editor, Stack, ToolCategory, ToolChoice, Variant};
 
 /// Whether µFerris BSP support can be toggled on for a `(variant, stack)` right
 /// now. Additive-support UX (M2 redesign, point 6): the toggle is greyed out
@@ -156,6 +156,11 @@ pub struct Config {
     /// the patch layer inserts them into `[dependencies]` for ALL stacks (M2
     /// redesign, point 5).
     pub extra_crates: Vec<String>,
+    /// Editor to emit rust-analyzer client configuration for. Defaults to
+    /// [`registry::default_editor`]; the `none` entry emits no files at all.
+    /// Backend-agnostic: the dispatcher writes this for every stack (see
+    /// `backend::write_editor_config`).
+    pub editor: &'static Editor,
 }
 
 /// Whether a structurally-valid selection can actually be generated right now.
@@ -203,6 +208,9 @@ pub struct RawConfig {
     /// Raw `--add-crate` specs (`name[@version]`), repeatable. Validated during
     /// resolution; empty when none were requested.
     pub extra_crates: Vec<String>,
+    /// Raw `--editor` id. `None` = not given → [`registry::default_editor`].
+    /// Validated against the catalog, in which `none` is a real entry.
+    pub editor: Option<String>,
 }
 
 impl Config {
@@ -399,6 +407,20 @@ impl Config {
             extra_crates.push(normalised);
         }
 
+        // --- editor support (--editor) ---
+        // Backend-agnostic (the spurious `test`-crate diagnostic is identical on
+        // every stack), so this is resolved without consulting variant/stack at all
+        // — there is no stack on which `--editor` is refused.
+        let editor = match raw.editor.as_deref().map(str::trim) {
+            None => registry::default_editor(),
+            Some(id) => registry::editor(id).ok_or_else(|| {
+                format!(
+                    "unknown --editor value '{id}'. Available: {}",
+                    registry::EDITORS.iter().map(|e| e.id).collect::<Vec<_>>().join(", ")
+                )
+            })?,
+        };
+
         // --- universal toolchain catalogs (flashing / logging / framework) ---
         // The three catalogs are device-agnostic; a stack's support list decides
         // which entries apply. They are a live, selectable axis only on the esp-hal
@@ -476,6 +498,7 @@ impl Config {
             logging,
             framework,
             extra_crates,
+            editor,
         };
 
         // Assembled base option set must satisfy the constraint graph before any
@@ -604,6 +627,13 @@ pub fn equivalent_command(cfg: &Config) -> String {
         parts.push(format!("--add-crate {spec}"));
     }
 
+    // Editor: omitted while it is the catalog default (VS Code), exactly like the
+    // toolchain flags above. `--editor none` is a normal catalog value, so it
+    // round-trips through the same branch.
+    if cfg.editor.id != registry::default_editor().id {
+        parts.push(format!("--editor {}", cfg.editor.id));
+    }
+
     // Output location is omitted: generation uses the default `<name>` dir in the
     // current directory, so the command carries no `-o` (v3 UNIFY).
     parts.join(" ")
@@ -698,6 +728,7 @@ mod tests {
             logging: None,
             framework: None,
             extra_crates: Vec::new(),
+            editor: None,
         }
     }
 
@@ -1265,6 +1296,130 @@ mod tests {
         // All-default groups → no group flags (keeps the command terse).
         let cmd = cmd_for(|r| r.chip = "xiao-esp32c6".to_string());
         assert_eq!(cmd, "xiao-generate --chip xiao-esp32c6");
+    }
+
+    // ---- universal editor support (--editor) ----
+
+    #[test]
+    fn editor_defaults_to_vscode_when_the_flag_is_absent() {
+        // THE no-regression guarantee: a user who passes nothing still gets the
+        // VS Code client config, which is the delivery path verified to clear the
+        // spurious `test`-crate diagnostic.
+        let c = Config::resolve(raw("xiao-esp32c3")).unwrap();
+        assert_eq!(c.editor.id, "vscode");
+        assert_eq!(c.editor.path, Some(".vscode/settings.json"));
+        assert!(c.editor.path.is_some());
+        // …and the default is catalog index 0, the convention the other catalogs use.
+        assert_eq!(registry::default_editor().id, registry::EDITORS[0].id);
+    }
+
+    #[test]
+    fn editor_default_is_backend_independent() {
+        // The diagnostic is identical on all three backends, so the default must
+        // not vary by stack — every one of them gets the same editor.
+        for (chip, stack) in [
+            ("xiao-esp32c3", None),
+            ("xiao-esp32c3", Some("esp-idf")),
+            ("xiao-rp2040", None),
+            ("xiao-rp2040", Some("embassy-rp")),
+            ("xiao-samd21", None),
+        ] {
+            let mut r = raw(chip);
+            r.stack = stack.map(|s| s.to_string());
+            let c = Config::resolve(r).unwrap_or_else(|e| panic!("{chip}/{stack:?}: {e}"));
+            assert_eq!(c.editor.id, "vscode", "{chip}/{stack:?} must get the same default");
+        }
+    }
+
+    #[test]
+    fn editor_none_is_a_catalog_entry_that_emits_nothing() {
+        let mut r = raw("xiao-esp32c3");
+        r.editor = Some("none".to_string());
+        let c = Config::resolve(r).unwrap();
+        assert_eq!(c.editor.id, "none");
+        assert!(c.editor.path.is_none(), "`none` must write no files");
+        assert!(c.editor.path.is_none());
+    }
+
+    #[test]
+    fn editor_accepts_every_catalog_id_and_rejects_unknown_ones() {
+        for e in registry::EDITORS {
+            let mut r = raw("xiao-esp32c3");
+            r.editor = Some(e.id.to_string());
+            let c = Config::resolve(r).unwrap_or_else(|err| panic!("{}: {err}", e.id));
+            assert_eq!(c.editor.id, e.id);
+        }
+        let mut r = raw("xiao-esp32c3");
+        r.editor = Some("emacs".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("unknown --editor"), "got: {e}");
+        // The error lists what IS available, including `none`.
+        assert!(e.contains("vscode") && e.contains("none"), "got: {e}");
+    }
+
+    #[test]
+    fn editor_is_accepted_on_every_stack_including_uferris() {
+        // Unlike flashing/logging/framework there is no stack on which `--editor`
+        // is refused — the axis is universal.
+        let mut r = raw("xiao-esp32c3");
+        r.stack = Some("esp-idf".to_string());
+        r.editor = Some("helix".to_string());
+        assert_eq!(Config::resolve(r).unwrap().editor.id, "helix");
+
+        let mut r = raw("xiao-esp32c3");
+        r.uferris = true;
+        r.editor = Some("zed".to_string());
+        assert_eq!(Config::resolve(r).unwrap().editor.id, "zed");
+    }
+
+    #[test]
+    fn parity_editor_default_is_omitted_from_the_command() {
+        // Default choice → no --editor flag (keeps the command terse).
+        let cmd = cmd_for(|r| r.chip = "xiao-esp32c6".to_string());
+        assert_eq!(cmd, "xiao-generate --chip xiao-esp32c6");
+        // …and passing the default explicitly round-trips to the same terse form.
+        let cmd = cmd_for(|r| {
+            r.chip = "xiao-esp32c6".to_string();
+            r.editor = Some("vscode".to_string());
+        });
+        assert_eq!(cmd, "xiao-generate --chip xiao-esp32c6");
+    }
+
+    /// Every non-default choice — `none` included — must appear in the command,
+    /// and the command must resolve back to the SAME choice, or the "parity"
+    /// promise is broken for this axis.
+    #[test]
+    fn parity_editor_choice_round_trips_through_resolution() {
+        for e in registry::EDITORS {
+            let mut r = raw("xiao-esp32c6");
+            r.out_dir = Some(PathBuf::from("proj"));
+            r.editor = Some(e.id.to_string());
+            let first = Config::resolve(r).unwrap();
+            let cmd = equivalent_command(&first);
+
+            if e.id == registry::default_editor().id {
+                assert!(!cmd.contains("--editor"), "the default must be omitted: {cmd}");
+            } else {
+                assert!(
+                    cmd.ends_with(&format!("--editor {}", e.id)),
+                    "`{}` must appear in the command: {cmd}",
+                    e.id
+                );
+            }
+
+            // Re-parse the `--editor` value out of the rendered command and resolve
+            // again; the resulting choice must be identical.
+            let toks: Vec<&str> = cmd.split_whitespace().collect();
+            let reparsed = toks
+                .windows(2)
+                .find(|w| w[0] == "--editor")
+                .map(|w| w[1].to_string());
+            let mut r2 = raw("xiao-esp32c6");
+            r2.out_dir = Some(PathBuf::from("proj"));
+            r2.editor = reparsed;
+            let second = Config::resolve(r2).unwrap();
+            assert_eq!(first.editor.id, second.editor.id, "`{}` did not round-trip via `{cmd}`", e.id);
+        }
     }
 
     #[test]

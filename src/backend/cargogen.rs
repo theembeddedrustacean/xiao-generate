@@ -13,6 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use tempfile::TempDir;
 
 use crate::model::Config;
 use crate::registry::{
@@ -46,8 +47,96 @@ pub fn preflight() -> Result<String> {
     Ok(ver)
 }
 
+/// Run a `git` subcommand inside `dir`, surfacing stderr verbatim on failure.
+///
+/// A missing `git` is reported with an actionable message. Note that the ESP
+/// `std` stack already requires `git` at *build* time (esp-idf-sys clones the
+/// ESP-IDF SDK itself), so this adds no new practical burden on the user.
+fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not run `git` ({e}). xiao-generate needs git on PATH to fetch the pinned \
+                 esp-idf-template revision (the generated project's ESP-IDF build needs it too)."
+            )
+        })?;
+    if !out.status.success() {
+        bail!(
+            "`git {}` failed:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out)
+}
+
+/// Materialize exactly `rev` of `url` into a throwaway local checkout.
+///
+/// # Why we fetch the template ourselves
+///
+/// The obvious spelling — `cargo generate --git <url> --rev <SHA>` — is
+/// **broken for any revision that is not the remote's current HEAD**.
+/// cargo-generate clones at `depth 1` and only *then* runs `revparse` for the
+/// requested revision, so a shallow clone that does not contain the commit
+/// fails with `revspec '<SHA>' not found; class=Reference (4); code=NotFound
+/// (-3)`. Our pin worked only until upstream landed one more commit on
+/// `master`, at which point *every* `--std` generation started failing
+/// (cargo-generate#1434; fixed upstream only in cargo-generate 0.23.14).
+///
+/// Bumping the pin to the new HEAD is not a fix — it re-breaks on the very next
+/// upstream commit. Instead we do the one thing that makes a commit pin mean
+/// what it says: fetch that exact object ourselves.
+///
+/// `git fetch --depth 1 origin <SHA>` asks the server for precisely the pinned
+/// commit, so it costs the **same single-commit transfer** as cargo-generate's
+/// own shallow clone while resolving regardless of where the branch has moved.
+/// The checkout is then handed to `cargo generate --path`, which produces
+/// byte-identical output to `--git`/`--rev` (see the equivalence note on
+/// [`scaffold`]).
+fn fetch_revision(url: &str, rev: &str) -> Result<TempDir> {
+    let dir = tempfile::Builder::new()
+        .prefix("xiao-generate-template-")
+        .tempdir()
+        .context("creating a temporary directory for the template checkout")?;
+    let p = dir.path();
+
+    git(p, &["init", "--quiet"])?;
+    git(p, &["remote", "add", "origin", url])?;
+    // Fetching the SHA directly (rather than a branch) is what makes the pin
+    // durable; GitHub allows it, and `--depth 1` keeps the transfer minimal.
+    git(p, &["fetch", "--depth", "1", "--quiet", "origin", rev]).with_context(|| {
+        format!(
+            "could not fetch revision {rev} from {url}.\nThis needs network access to the \
+             template repository; if you are offline, retry when connected."
+        )
+    })?;
+    git(
+        p,
+        &["-c", "advice.detachedHead=false", "checkout", "--quiet", "FETCH_HEAD"],
+    )?;
+
+    // Integrity: the tree we are about to expand must be the pinned commit and
+    // nothing else. Cheap, and it turns any transport/config surprise into a
+    // loud failure instead of a silently different project.
+    let head = git(p, &["rev-parse", "HEAD"])?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if head != rev {
+        bail!("template checkout landed on {head}, expected the pinned revision {rev}");
+    }
+    Ok(dir)
+}
+
 pub fn scaffold(cfg: &Config) -> Result<()> {
     let _installed = preflight()?;
+
+    // Pinned revision first, then expand it from disk. `cargo generate --path
+    // <checkout> cargo` is equivalent to `--git <url> --rev <SHA> cargo`
+    // (verified byte-for-byte on a revision that both spellings can reach) but
+    // does not depend on the pin still being the branch tip.
+    let template = fetch_revision(ESP_IDF_TEMPLATE_GIT, ESP_IDF_TEMPLATE_REV)?;
 
     let out_dir = &cfg.out_dir;
     let name = out_dir
@@ -65,10 +154,8 @@ pub fn scaffold(cfg: &Config) -> Result<()> {
 
     let mut cmd = Command::new("cargo");
     cmd.arg("generate")
-        .arg("--git")
-        .arg(ESP_IDF_TEMPLATE_GIT)
-        .arg("--rev")
-        .arg(ESP_IDF_TEMPLATE_REV)
+        .arg("--path")
+        .arg(template.path())
         .arg("cargo")
         .arg("--name")
         .arg(name)
@@ -96,4 +183,96 @@ pub fn scaffold(cfg: &Config) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    fn run(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}:\n{}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// The regression guard for the shallow-clone bug this module works around.
+    ///
+    /// It builds a two-commit repository and asks [`fetch_revision`] for the
+    /// **first** commit — i.e. a revision that is deliberately *not* HEAD, which
+    /// is exactly the case `cargo generate --git … --rev` cannot serve from its
+    /// `depth 1` clone. Entirely local (a `file://` remote), so it needs no
+    /// network and cannot be perturbed by upstream moving on.
+    #[test]
+    fn pinned_revision_resolves_when_it_is_not_head() {
+        if !git_available() {
+            eprintln!("skipping: git not installed");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let p = src.path();
+        run(p, &["init", "--quiet", "-b", "main", "."]);
+        run(p, &["config", "user.email", "test@example.invalid"]);
+        run(p, &["config", "user.name", "test"]);
+        // Serving an arbitrary SHA to a fetch is opt-in for a local remote;
+        // GitHub (our real remote) enables it by default.
+        run(p, &["config", "uploadpack.allowAnySHA1InWant", "true"]);
+
+        std::fs::write(p.join("marker.txt"), "pinned\n").unwrap();
+        run(p, &["add", "-A"]);
+        run(p, &["commit", "--quiet", "-m", "pinned"]);
+        let pinned = String::from_utf8(
+            Command::new("git").current_dir(p).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Move the branch on, so `pinned` is now HEAD~1 — the situation that
+        // broke every `--std` generation in the field.
+        std::fs::write(p.join("marker.txt"), "moved on\n").unwrap();
+        run(p, &["add", "-A"]);
+        run(p, &["commit", "--quiet", "-m", "later"]);
+        let head = String::from_utf8(
+            Command::new("git").current_dir(p).args(["rev-parse", "HEAD"]).output().unwrap().stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(pinned, head, "test setup: the pin must not be HEAD");
+
+        let url = format!("file://{}", p.display());
+        let checkout = fetch_revision(&url, &pinned).expect("pinned non-HEAD revision must resolve");
+
+        // The content is the pinned commit's, not the branch tip's.
+        let marker = std::fs::read_to_string(checkout.path().join("marker.txt")).unwrap();
+        assert_eq!(marker, "pinned\n", "checkout must hold the pinned revision's tree");
+    }
+
+    /// A revision that does not exist must fail loudly rather than silently
+    /// falling back to the branch tip.
+    #[test]
+    fn unknown_revision_is_an_error() {
+        if !git_available() {
+            eprintln!("skipping: git not installed");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let p = src.path();
+        run(p, &["init", "--quiet", "-b", "main", "."]);
+        run(p, &["config", "user.email", "test@example.invalid"]);
+        run(p, &["config", "user.name", "test"]);
+        std::fs::write(p.join("f.txt"), "x\n").unwrap();
+        run(p, &["add", "-A"]);
+        run(p, &["commit", "--quiet", "-m", "only"]);
+
+        let url = format!("file://{}", p.display());
+        let err = fetch_revision(&url, "0000000000000000000000000000000000000000").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("could not fetch revision"),
+            "expected a fetch error, got: {err:#}"
+        );
+    }
 }

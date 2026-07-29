@@ -1,0 +1,5 @@
+{
+  "//": "rust-analyzer defaults to `cargo check --all-targets`, which builds the test target. The `test` crate does not exist for bare-metal targets (nor for the esp-idf build-std set), so without these the editor reports `E0463: can't find crate for test` on a project that builds fine. See rust-analyzer.toml in the project root for the full rationale.",
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.check.allTargets": false
+}

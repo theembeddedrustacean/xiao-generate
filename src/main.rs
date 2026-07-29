@@ -8,6 +8,7 @@ mod backend;
 mod cli;
 mod model;
 mod patch;
+mod prereq;
 mod registry;
 mod templates;
 mod tui;
@@ -115,6 +116,9 @@ fn run() -> i32 {
         print_stacks(args.chip.as_deref());
         return 0;
     }
+    if args.check {
+        return run_check(&args);
+    }
 
     match resolve_mode(&args, std::io::stdout().is_terminal()) {
         Mode::Tui => {
@@ -150,6 +154,34 @@ fn run_headless(args: &Cli) -> i32 {
         }
     };
     generate(&cfg)
+}
+
+/// `--check`: resolve the config exactly as headless generation would, then print
+/// only the prerequisite report and stop. Generates nothing and writes nothing.
+///
+/// Shares `Config::resolve` and `print_prerequisites` with the generation path,
+/// so what it reports is by construction what a real run would report. Exit code:
+/// 0 = everything needed is installed, 1 = something is missing, 2 = the config
+/// itself is invalid (same as headless).
+fn run_check(args: &Cli) -> i32 {
+    let cfg = match build_raw(args).and_then(Config::resolve) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    println!(
+        "Host prerequisites for a {} project on the {} stack:",
+        cfg.variant.display, cfg.stack.id
+    );
+    let missing = print_prerequisites(&cfg);
+    if missing > 0 {
+        println!("\n{missing} missing — run the install command(s) above.");
+        return 1;
+    }
+    println!("\nAll prerequisites are installed.");
+    0
 }
 
 /// Interactive path: the TUI builds a resolved `Config` from the same
@@ -310,6 +342,47 @@ fn print_templates(chip: Option<&str>) {
     }
 }
 
+/// Report the host prerequisites **this** project needs, each one actually
+/// probed on this machine, grouped build-vs-flash.
+///
+/// The selection is [`model::prerequisites`] (registry-derived, R4) and the
+/// detection is [`prereq::Host`] — this function only renders, so it contains no
+/// chip, stack or tool knowledge and cannot drift from the registry. Nothing is
+/// claimed without a probe: a `✔` means the probe found it, a `✗` means it did
+/// not, and the install command is shown only where it is actually needed.
+///
+/// Returns the number of missing prerequisites so callers (`--check`) can turn
+/// it into an exit code.
+fn print_prerequisites(cfg: &Config) -> usize {
+    let all = model::prerequisites(cfg);
+    let mut host = prereq::Host::new();
+    let detected: Vec<(&registry::Prereq, prereq::Status)> =
+        all.into_iter().map(|p| { let s = host.detect(p); (p, s) }).collect();
+
+    let mut missing = 0;
+    for (need, heading) in [
+        (registry::Need::Build, "prerequisites to build:"),
+        (registry::Need::Flash, "prerequisites to flash:"),
+    ] {
+        let group: Vec<_> = detected.iter().filter(|(p, _)| p.need == need).collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("\n  {heading}");
+        for (p, status) in group {
+            println!("    {} {}", status.marker(), p.display);
+            if status.is_missing() {
+                missing += 1;
+                println!("        install: {}", p.install);
+            }
+            if let Some(note) = p.note {
+                println!("        · {note}");
+            }
+        }
+    }
+    missing
+}
+
 fn print_summary(cfg: &Config) {
     // Universal, device-agnostic facts only (v3 UNIFY): no esp-generate vocabulary
     // and no Add-on/Crates/Output lines. The generated path still appears once, in
@@ -345,20 +418,21 @@ fn print_summary(cfg: &Config) {
     }
     println!("\n  equivalent command:");
     println!("    {}", model::equivalent_command(cfg));
+    print_prerequisites(cfg);
+    // The unconditional `rustup target add` and "S3 is Xtensa" lines that used to
+    // live here are gone: the prerequisite block above says the same things, but
+    // only when they are actually outstanding on this host, and with the exact
+    // install command. Telling a user to install a target the probe just found is
+    // the noise this feature exists to remove.
     println!("\nNext steps:");
     println!("  cd {}", cfg.out_dir.display());
-    if !cfg.stack.backend.is_esp() {
-        // The non-ESP scaffold pins the target in .cargo/config.toml but cannot
-        // install it for the user.
-        println!("  rustup target add {}", cfg.stack.target);
-    }
     println!("  cargo build");
-    if cfg.variant.arch == registry::Arch::Xtensa {
-        println!("  (ESP32-S3 is Xtensa — needs the `esp` toolchain via espup)");
-    }
     if cfg.stack.is_std() {
+        // Deliberately does NOT say "via espup": esp-idf-sys is what fetches and
+        // builds the SDK, on RISC-V as well as Xtensa, and espup is only in the
+        // picture for Xtensa (where the prerequisite block names it).
         println!(
-            "  (esp-idf std stack: the first build pulls & builds the ESP-IDF {} SDK via espup/esp-idf-sys)",
+            "  (esp-idf std stack: the first build pulls & builds the ESP-IDF {} SDK via esp-idf-sys — expect a long first build)",
             registry::ESP_IDF_VERSION
         );
     }

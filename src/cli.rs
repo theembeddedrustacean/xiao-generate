@@ -113,6 +113,15 @@ pub struct Cli {
     #[arg(long)]
     pub headless: bool,
 
+    /// Report the host prerequisites a project for this configuration needs —
+    /// which are installed, and the exact command for any that are not — then
+    /// exit WITHOUT generating anything. Same report the summary prints after a
+    /// real generation. Requires --chip; honours every other flag, so
+    /// `--check --chip xiao-esp32c6 --flashing probe-rs` reports what THAT
+    /// project would need. Exits 1 if anything is missing.
+    #[arg(long)]
+    pub check: bool,
+
     /// List supported module variants and exit.
     #[arg(long)]
     pub list_chips: bool,

@@ -588,6 +588,176 @@ fn summary_reports_the_editor_and_the_neovim_caveat() {
     assert!(s.contains("--editor neovim"), "command must carry the editor:\n{s}");
 }
 
+// ---------------------------------------------------------------------------
+// Host prerequisite reporting (post-generation summary + `--check`).
+//
+// These assert the *end-to-end* behaviour over the real binary on the real host:
+// the report appears, it is scoped to the project, and each marker reflects an
+// actual probe. They deliberately do not assert that any particular tool IS
+// installed (that varies by machine) — only that what is reported is consistent
+// with probing the same thing here.
+// ---------------------------------------------------------------------------
+
+/// Run a probe the same way the tool does: is this executable on PATH at all
+/// (exit status ignored — `picotool --version` exits 255 yet is installed).
+fn tool_on_path(argv: &[&str]) -> bool {
+    let (exe, args) = argv.split_first().unwrap();
+    Command::new(exe).args(args).output().is_ok()
+}
+
+/// Both groups appear, and the marker next to a tool matches what an independent
+/// probe of that same tool says right now. This is what makes the report
+/// trustworthy: it is not a static list dressed up with ticks.
+#[test]
+fn summary_reports_prerequisites_and_the_markers_are_real() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("prereq-rp");
+    let res = bin()
+        .args(["--chip", "xiao-rp2040", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(res.status.success());
+    let s = String::from_utf8_lossy(&res.stdout);
+
+    assert!(s.contains("prerequisites to build:"), "missing build group:\n{s}");
+    assert!(s.contains("prerequisites to flash:"), "missing flash group:\n{s}");
+    assert!(s.contains("thumbv6m-none-eabi"), "must name the RP2040 target:\n{s}");
+    assert!(s.contains("picotool"), "must name the RP2040 flash tool:\n{s}");
+
+    // The picotool line's marker must agree with an independent probe.
+    let line = s
+        .lines()
+        .find(|l| l.contains("picotool"))
+        .unwrap_or_else(|| panic!("no picotool line:\n{s}"));
+    if tool_on_path(&["picotool", "version"]) {
+        assert!(line.contains('✔'), "picotool is on PATH but reported missing: {line}");
+        assert!(
+            !s.contains("install: brew install picotool"),
+            "an installed tool must not be given an install command:\n{s}"
+        );
+    } else {
+        assert!(line.contains('✗'), "picotool is not on PATH but reported present: {line}");
+        assert!(
+            s.contains("install: brew install picotool"),
+            "a missing tool must carry its install command:\n{s}"
+        );
+    }
+}
+
+/// The scoping promise, over the real binary: an RP2040 project never mentions
+/// the ESP toolchain, and an ESP project never mentions the RP/UF2 tools.
+#[test]
+fn prerequisite_report_never_mentions_another_board_s_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let rp = tmp.path().join("scope-rp");
+    let out = bin()
+        .args(["--chip", "xiao-rp2040", "-o", rp.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    for foreign in ["espup", "espflash", "ldproxy", "hf2", "uf2conv"] {
+        assert!(!s.contains(foreign), "RP2040 summary mentions {foreign}:\n{s}");
+    }
+
+    // `--check` needs no generator, so the ESP half runs everywhere.
+    let out = bin().args(["--check", "--chip", "xiao-esp32c3"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    for foreign in ["picotool", "uf2conv", "hf2", "thumbv"] {
+        assert!(!s.contains(foreign), "ESP32-C3 report mentions {foreign}:\n{s}");
+    }
+    assert!(s.contains("riscv32imc-unknown-none-elf"), "C3 must name its target:\n{s}");
+}
+
+/// Xtensa must be reported as needing espup, and RISC-V must not — the
+/// distinction the ESP prerequisite story turns on. Uses `--check`, so no
+/// generator is required.
+#[test]
+fn check_reports_espup_for_xtensa_only() {
+    let s3 = bin().args(["--check", "--chip", "xiao-esp32s3"]).output().unwrap();
+    let s3 = String::from_utf8_lossy(&s3.stdout);
+    assert!(s3.contains("Xtensa"), "S3 must report the Xtensa toolchain:\n{s3}");
+    assert!(s3.contains("espup"), "S3 must point at espup:\n{s3}");
+
+    let c6 = bin().args(["--check", "--chip", "xiao-esp32c6"]).output().unwrap();
+    let c6 = String::from_utf8_lossy(&c6.stdout);
+    assert!(c6.contains("riscv32imac-unknown-none-elf"), "C6 target:\n{c6}");
+    assert!(!c6.contains("espup"), "C6 is RISC-V — espup must not appear:\n{c6}");
+}
+
+/// The ESP `std` stack's own build tools, and the fact that RISC-V std needs
+/// nightly + rust-src rather than espup.
+#[test]
+fn check_reports_the_esp_idf_std_build_tools() {
+    let out = bin().args(["--check", "--chip", "xiao-esp32c3", "--std"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("ldproxy"), "esp-idf links through ldproxy:\n{s}");
+    assert!(s.contains("python3") && s.contains("git"), "esp-idf host tools:\n{s}");
+    assert!(s.contains("rust-src"), "RISC-V std is a build-std target:\n{s}");
+    assert!(!s.contains("espup"), "RISC-V std must not ask for espup:\n{s}");
+    // cmake/ninja are installed by esp-idf-sys itself — not host prerequisites.
+    assert!(!s.contains("cmake") && !s.contains("ninja"), "bootstrapped tools leaked:\n{s}");
+}
+
+/// `--check` reports without generating, and its exit code carries the answer.
+#[test]
+fn check_generates_nothing_and_exit_code_tracks_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("should-not-exist");
+    let res = bin()
+        .args(["--check", "--chip", "xiao-rp2040", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.exists(), "--check must not write a project");
+
+    let s = String::from_utf8_lossy(&res.stdout);
+    let missing = s.matches('✗').count();
+    if missing == 0 {
+        assert!(res.status.success(), "nothing missing → exit 0:\n{s}");
+        assert!(s.contains("All prerequisites are installed"), "{s}");
+    } else {
+        assert_eq!(res.status.code(), Some(1), "something missing → exit 1:\n{s}");
+        assert!(s.contains("missing"), "{s}");
+    }
+}
+
+/// `--check` runs the same validation as generation, so a bad config is the same
+/// clean exit-2 usage error — not a report about a project that cannot exist.
+#[test]
+fn check_rejects_an_invalid_config_before_probing() {
+    let res = bin().args(["--check", "--chip", "xiao-nope"]).output().unwrap();
+    assert_eq!(res.status.code(), Some(2));
+    let e = String::from_utf8_lossy(&res.stderr);
+    assert!(e.contains("unknown chip"), "{e}");
+
+    // …and --check still requires a chip.
+    let res = bin().arg("--check").output().unwrap();
+    assert_eq!(res.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&res.stderr).contains("--chip"));
+}
+
+/// The old unconditional advice is gone: the report is conditional, so a target
+/// that IS installed must not still be accompanied by "rustup target add".
+#[test]
+fn an_installed_target_is_not_also_advertised_as_a_next_step() {
+    if !target_installed("thumbv6m-none-eabi") {
+        eprintln!("skipping: thumbv6m-none-eabi not installed");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("no-stale-advice");
+    let res = bin()
+        .args(["--chip", "xiao-rp2040", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&res.stdout);
+    assert!(
+        !s.contains("rustup target add"),
+        "the target is installed — the summary must not tell the user to add it:\n{s}"
+    );
+    assert!(s.contains("✔ Rust target thumbv6m-none-eabi"), "…but must confirm it:\n{s}");
+}
+
 /// `--editor` takes exactly ONE value: a second occurrence is a clap usage error,
 /// not a silently-merged selection.
 #[test]

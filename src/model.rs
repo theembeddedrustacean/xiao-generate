@@ -4,7 +4,9 @@
 
 use std::path::PathBuf;
 
-use crate::registry::{self, Backend, Editor, Stack, ToolCategory, ToolChoice, Variant};
+use crate::registry::{
+    self, Backend, Editor, Need, Prereq, Stack, ToolCategory, ToolChoice, Variant,
+};
 
 /// Whether µFerris BSP support can be toggled on for a `(variant, stack)` right
 /// now. Additive-support UX (M2 redesign, point 6): the toggle is greyed out
@@ -552,6 +554,61 @@ impl Config {
                 .unwrap_or_default()
         }
     }
+}
+
+/// The host prerequisites a resolved config actually needs, in display order
+/// (build group first, then flash), de-duplicated.
+///
+/// Pure over the registry (R4) — no chip/stack/tool knowledge lives here, only
+/// the three places a prerequisite can come from:
+///
+///  1. **the target/toolchain**, derived from `stack.target`, whose triple is
+///     itself a [`registry::PREREQS`] id. This is what makes an Xtensa project ask
+///     for espup while a RISC-V one asks for `rustup target add`, with no branch
+///     on `arch` anywhere;
+///  2. **the stack's own build tools** (`Stack::build_prereqs`) — e.g. esp-idf's
+///     `ldproxy`/`python3`/`git`;
+///  3. **the flash route**. On a stack where FLASHING is a live user choice
+///     (esp-hal) it follows the chosen [`registry::ToolChoice`], so `--flashing
+///     probe-rs` swaps espflash out for probe-rs. Everywhere else the route is
+///     fixed — by the board's bootloader (non-ESP USB/UF2) or by the template's
+///     cargo runner (esp-idf) — and comes from `Stack::flash_prereqs`.
+///
+/// µFerris adds nothing: `uferris-bsp` is an ordinary cargo dependency on the
+/// esp-hal stack, so a µFerris project needs exactly what the same chip's plain
+/// esp-hal project needs (pinned by `uferris_adds_no_host_prerequisite`).
+pub fn prerequisites(cfg: &Config) -> Vec<&'static Prereq> {
+    let mut out: Vec<&'static Prereq> = Vec::new();
+    let push = |out: &mut Vec<&'static Prereq>, id: &str| {
+        if let Some(p) = registry::prereq(id) {
+            if !out.iter().any(|q| q.id == p.id) {
+                out.push(p);
+            }
+        }
+    };
+
+    // (1) target / toolchain, then (2) the stack's extra build tools.
+    push(&mut out, cfg.stack.target);
+    for id in cfg.stack.build_prereqs {
+        push(&mut out, id);
+    }
+
+    // (3) the flash route.
+    if category_live(cfg.stack, ToolCategory::Flashing) {
+        for id in cfg.flashing.prereqs {
+            push(&mut out, id);
+        }
+    }
+    for id in cfg.stack.flash_prereqs {
+        push(&mut out, id);
+    }
+
+    // Build before flash, stable within each group (the order above).
+    out.sort_by_key(|p| match p.need {
+        Need::Build => 0,
+        Need::Flash => 1,
+    });
+    out
 }
 
 /// The default template id for a resolved config's `(variant, stack, mode)` —
@@ -1419,6 +1476,142 @@ mod tests {
             r2.editor = reparsed;
             let second = Config::resolve(r2).unwrap();
             assert_eq!(first.editor.id, second.editor.id, "`{}` did not round-trip via `{cmd}`", e.id);
+        }
+    }
+
+    // ---- host prerequisite SELECTION (the right prereqs for the right config) ----
+
+    /// Resolve `chip` (+ tweaks) and return the ids `prerequisites` selected.
+    fn prereq_ids(chip: &str, build: impl FnOnce(&mut RawConfig)) -> Vec<&'static str> {
+        let mut r = raw(chip);
+        build(&mut r);
+        let cfg = Config::resolve(r).unwrap_or_else(|e| panic!("{chip}: {e}"));
+        prerequisites(&cfg).into_iter().map(|p| p.id).collect()
+    }
+
+    /// THE acceptance property: a project is only ever told about tools it can
+    /// actually use. An RP2040 project must not mention espup or espflash; an
+    /// esp-idf project must not mention picotool.
+    #[test]
+    fn prerequisites_are_scoped_to_the_resolved_config() {
+        let rp = prereq_ids("xiao-rp2040", |_| {});
+        assert_eq!(rp, vec!["thumbv6m-none-eabi", "picotool"]);
+        for foreign in ["xtensa-esp32s3-none-elf", "espflash", "ldproxy", "hf2", "uf2conv"] {
+            assert!(!rp.contains(&foreign), "RP2040 must not mention {foreign}: {rp:?}");
+        }
+
+        let idf = prereq_ids("xiao-esp32c3", |r| r.stack = Some("esp-idf".into()));
+        assert_eq!(
+            idf,
+            vec!["riscv32imc-esp-espidf", "ldproxy", "python3", "git", "espflash"]
+        );
+        for foreign in ["picotool", "hf2", "uf2conv", "probe-rs"] {
+            assert!(!idf.contains(&foreign), "esp-idf must not mention {foreign}: {idf:?}");
+        }
+    }
+
+    /// Xtensa asks for espup; RISC-V no_std asks for a plain rustup target. The
+    /// distinction the whole ESP story turns on.
+    #[test]
+    fn xtensa_asks_for_espup_and_riscv_does_not() {
+        let s3 = prereq_ids("xiao-esp32s3", |_| {});
+        assert_eq!(s3, vec!["xtensa-esp32s3-none-elf", "espflash"]);
+        assert!(registry::prereq("xtensa-esp32s3-none-elf").unwrap().install.contains("espup"));
+
+        for (chip, target) in [
+            ("xiao-esp32c3", "riscv32imc-unknown-none-elf"),
+            ("xiao-esp32c6", "riscv32imac-unknown-none-elf"),
+        ] {
+            let ids = prereq_ids(chip, |_| {});
+            assert_eq!(ids, vec![target, "espflash"], "{chip}");
+            assert!(
+                !registry::prereq(target).unwrap().install.contains("espup"),
+                "{chip} must not need espup"
+            );
+        }
+    }
+
+    /// On esp-hal the flashing tool is a live user choice, so the flash
+    /// prerequisite must follow `--flashing` rather than being fixed.
+    #[test]
+    fn esp_hal_flash_prerequisite_follows_the_flashing_choice() {
+        let default = prereq_ids("xiao-esp32c6", |_| {});
+        assert!(default.contains(&"espflash") && !default.contains(&"probe-rs"), "{default:?}");
+
+        let probe = prereq_ids("xiao-esp32c6", |r| r.flashing = Some("probe-rs".into()));
+        assert!(probe.contains(&"probe-rs") && !probe.contains(&"espflash"), "{probe:?}");
+        // …and the build side is unchanged by a flashing choice.
+        assert_eq!(probe[0], "riscv32imac-unknown-none-elf");
+    }
+
+    /// µFerris is an ordinary cargo dependency on the esp-hal stack, so it must
+    /// add nothing to the host prerequisites. (Stated as a claim in the summary's
+    /// design; pinned here so it stays true.)
+    #[test]
+    fn uferris_adds_no_host_prerequisite() {
+        for chip in ["xiao-esp32c3", "xiao-esp32c6"] {
+            let plain = prereq_ids(chip, |_| {});
+            let uferris = prereq_ids(chip, |r| r.uferris = true);
+            let power = prereq_ids(chip, |r| r.power_board = true);
+            assert_eq!(plain, uferris, "{chip}: µFerris changed the prerequisites");
+            assert_eq!(plain, power, "{chip}: the power board changed the prerequisites");
+        }
+    }
+
+    /// Each non-ESP board's USB/UF2 flash route, end to end through resolution.
+    #[test]
+    fn non_esp_boards_get_their_own_usb_flash_route() {
+        for (chip, want) in [
+            ("xiao-rp2040", vec!["picotool"]),
+            ("xiao-rp2350", vec!["picotool"]),
+            ("xiao-nrf52840", vec!["rust-objcopy", "uf2conv"]),
+            ("xiao-nrf52840-sense", vec!["rust-objcopy", "uf2conv"]),
+            ("xiao-samd21", vec!["hf2"]),
+        ] {
+            let ids = prereq_ids(chip, |_| {});
+            let flash: Vec<&str> = ids
+                .iter()
+                .copied()
+                .filter(|id| registry::prereq(id).unwrap().need == Need::Flash)
+                .collect();
+            assert_eq!(flash, want, "{chip}");
+        }
+    }
+
+    /// Every generatable configuration must select at least one build
+    /// prerequisite (the target/toolchain), grouped build-before-flash, with no
+    /// duplicates. Sweeps the whole registry so a new variant/stack cannot ship
+    /// with an empty or mis-ordered report.
+    #[test]
+    fn every_configuration_reports_a_well_formed_prerequisite_list() {
+        for v in registry::VARIANTS {
+            for s in v.stacks {
+                let mut r = raw(v.id);
+                r.stack = Some(s.id.to_string());
+                let cfg = Config::resolve(r).unwrap_or_else(|e| panic!("{}/{}: {e}", v.id, s.id));
+                let list = prerequisites(&cfg);
+
+                assert!(!list.is_empty(), "{}/{} selected nothing", v.id, s.id);
+                // The first entry is always the target/toolchain for this stack.
+                assert_eq!(list[0].id, s.target, "{}/{} must lead with its target", v.id, s.id);
+                // No duplicates.
+                let mut ids: Vec<&str> = list.iter().map(|p| p.id).collect();
+                let before = ids.len();
+                ids.sort_unstable();
+                ids.dedup();
+                assert_eq!(ids.len(), before, "{}/{} has duplicate prerequisites", v.id, s.id);
+                // Build group strictly before flash group.
+                let first_flash = list.iter().position(|p| p.need == Need::Flash);
+                if let Some(i) = first_flash {
+                    assert!(
+                        list[i..].iter().all(|p| p.need == Need::Flash),
+                        "{}/{}: build prerequisites must all precede flash ones",
+                        v.id, s.id
+                    );
+                }
+                // Every generatable project must be flashable somehow.
+                assert!(first_flash.is_some(), "{}/{} has no flash route", v.id, s.id);
+            }
         }
     }
 

@@ -256,6 +256,14 @@ pub struct Variant {
     /// non-ESP chip family id (`rp2040`, `rp235x`, `nrf52840`, `atsamd21`) that
     /// selects the scaffold's base body. Shared across a variant's stacks.
     pub chip: &'static str,
+    /// Instruction-set family. Registry truth about the part, kept as data even
+    /// though no *rendering* path branches on it any more: prerequisites are
+    /// derived from the target triple (which is a [`PREREQS`] id) rather than
+    /// from the arch, so the print path needs no arch knowledge. The invariant
+    /// tying the two together — Xtensa targets need espup, RISC-V/ARM ones are
+    /// plain rustup targets — is asserted by
+    /// `xtensa_targets_need_espup_and_others_do_not`.
+    #[allow(dead_code)]
     pub arch: Arch,
     pub led: Option<Led>,
     /// Supported stacks (D6). First entry is the default. The backend + target +
@@ -405,17 +413,17 @@ pub struct ToolChoice {
 /// Flashing tools (universal). espflash + probe-rs are the two flashing tools;
 /// espflash is the esp-hal default, probe-rs the debug-probe path.
 pub const FLASHING_TOOLS: &[ToolChoice] = &[
-    ToolChoice { id: "espflash", display: "espflash", esp_options: &["esp-backtrace"] },
-    ToolChoice { id: "probe-rs", display: "probe-rs", esp_options: &["probe-rs", "panic-rtt-target"] },
+    ToolChoice { id: "espflash", display: "espflash", esp_options: &["esp-backtrace"], prereqs: &["espflash"] },
+    ToolChoice { id: "probe-rs", display: "probe-rs", esp_options: &["probe-rs", "panic-rtt-target"], prereqs: &["probe-rs"] },
 ];
 
 /// Logging frontends (universal). On esp-hal, `log` is mutually exclusive with a
 /// probe-rs flashing tool (constraint graph) — that greying is derived, not
 /// hand-coded.
 pub const LOGGING: &[ToolChoice] = &[
-    ToolChoice { id: "none", display: "none", esp_options: &[] },
-    ToolChoice { id: "log", display: "log", esp_options: &["log"] },
-    ToolChoice { id: "defmt", display: "defmt", esp_options: &["defmt"] },
+    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[] },
+    ToolChoice { id: "log", display: "log", esp_options: &["log"], prereqs: &[] },
+    ToolChoice { id: "defmt", display: "defmt", esp_options: &["defmt"], prereqs: &[] },
 ];
 
 /// Application frameworks (universal). embassy is the async framework (wired on
@@ -423,9 +431,9 @@ pub const LOGGING: &[ToolChoice] = &[
 /// — it greys on ESP; on the ARM parts it is a declared framework gap until an
 /// RTIC body is compile-verified, see `Scaffold::framework_gaps`).
 pub const FRAMEWORKS: &[ToolChoice] = &[
-    ToolChoice { id: "none", display: "none", esp_options: &[] },
-    ToolChoice { id: "embassy", display: "embassy", esp_options: &["embassy", "unstable-hal"] },
-    ToolChoice { id: "rtic", display: "RTIC", esp_options: &[] },
+    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[] },
+    ToolChoice { id: "embassy", display: "embassy", esp_options: &["embassy", "unstable-hal"], prereqs: &[] },
+    ToolChoice { id: "rtic", display: "RTIC", esp_options: &[], prereqs: &[] },
 ];
 
 /// The three universal toolchain categories, in display order.
@@ -762,6 +770,27 @@ pub const PREREQS: &[Prereq] = &[
         // invocation, `--version` included. Spawn-success is the real signal.
         probe: Probe::Binary(&["ldproxy", "--version"]),
         install: "cargo install ldproxy",
+        need: Need::Build,
+        note: None,
+    },
+    // esp-idf-sys bootstraps the ESP-IDF SDK itself — and its GCC/clang
+    // toolchains, cmake and ninja — through `idf_tools.py`, so those are NOT
+    // host prerequisites. python3 and git are: embuild shells out to the `git`
+    // binary (clone/checkout/apply/rev-parse) and runs `python3` to create the
+    // SDK's venv, before any of the bootstrapped tools exist.
+    Prereq {
+        id: "python3",
+        display: "python3",
+        probe: Probe::Binary(&["python3", "--version"]),
+        install: "brew install python3",
+        need: Need::Build,
+        note: None,
+    },
+    Prereq {
+        id: "git",
+        display: "git",
+        probe: Probe::Binary(&["git", "--version"]),
+        install: "xcode-select --install",
         need: Need::Build,
         note: None,
     },
@@ -1268,6 +1297,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "esp-idf",
@@ -1280,6 +1311,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                build_prereqs: ESP_IDF_BUILD_PREREQS,
+                flash_prereqs: ESP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: Some("xiao-esp32c3"),
@@ -1305,6 +1338,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "esp-idf",
@@ -1317,6 +1352,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                build_prereqs: ESP_IDF_BUILD_PREREQS,
+                flash_prereqs: ESP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: Some("xiao-esp32c6"),
@@ -1342,6 +1379,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "esp-idf",
@@ -1354,6 +1393,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                build_prereqs: ESP_IDF_BUILD_PREREQS,
+                flash_prereqs: ESP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: Some("xiao-esp32s3"),
@@ -1379,6 +1420,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "esp-idf",
@@ -1391,6 +1434,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                build_prereqs: ESP_IDF_BUILD_PREREQS,
+                flash_prereqs: ESP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: Some("xiao-esp32s3"), // S3 flag; derived from C6 example
@@ -1419,6 +1464,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&RP2040_HAL_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: RP_FLASH_PREREQS,
             },
             Stack {
                 id: "embassy-rp",
@@ -1431,6 +1478,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_RP2040_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: RP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1456,6 +1505,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&RP235X_HAL_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: RP_FLASH_PREREQS,
             },
             Stack {
                 id: "embassy-rp",
@@ -1468,6 +1519,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_RP235X_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: RP_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1493,6 +1546,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&NRF_HAL_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NRF_FLASH_PREREQS,
             },
             Stack {
                 id: "embassy-nrf",
@@ -1505,6 +1560,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_NRF_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NRF_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1530,6 +1587,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&NRF_HAL_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NRF_FLASH_PREREQS,
             },
             Stack {
                 id: "embassy-nrf",
@@ -1542,6 +1601,8 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_NRF_SCAFFOLD),
+                build_prereqs: NO_PREREQS,
+                flash_prereqs: NRF_FLASH_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1570,6 +1631,8 @@ pub const VARIANTS: &[Variant] = &[
             logging: ARM_LOGGING,
             frameworks: SAMD_FRAMEWORKS,
             scaffold: Some(&SAMD21_SCAFFOLD),
+            build_prereqs: NO_PREREQS,
+            flash_prereqs: SAMD_FLASH_PREREQS,
         }],
         uferris_chip_feature: None,
         uferris_gap: None,
@@ -1971,6 +2034,195 @@ mod tests {
         // knob for later; no crates invented here).
         for v in VARIANTS {
             assert!(v.default_crates.is_empty(), "{} default_crates must be empty for now", v.id);
+        }
+    }
+
+    // ---- host prerequisites (registry data) ----
+
+    #[test]
+    fn prereq_catalog_is_well_formed() {
+        let mut seen = Vec::new();
+        for p in PREREQS {
+            assert!(!seen.contains(&p.id), "duplicate prerequisite id '{}'", p.id);
+            seen.push(p.id);
+            assert!(!p.display.is_empty(), "{} has no display name", p.id);
+            assert!(!p.install.is_empty(), "{} has no install command", p.id);
+            assert_eq!(prereq(p.id).map(|q| q.id), Some(p.id), "{} is not resolvable", p.id);
+            if let Probe::Binary(argv) = p.probe {
+                assert!(!argv.is_empty(), "{} has an empty probe argv", p.id);
+            }
+        }
+        // A backend generator is xiao-generate's own dependency, not the
+        // generated project's — it must never leak into this catalog (v3 UNIFY).
+        for p in PREREQS {
+            for banned in ["esp-generate", "cargo-generate"] {
+                assert_ne!(p.id, banned, "{banned} is the generator's prerequisite, not a project's");
+            }
+        }
+    }
+
+    /// The load-bearing invariant of the whole design: `Stack::target` doubles as
+    /// the id of that stack's toolchain prerequisite, so the selection code needs
+    /// no target→toolchain mapping. Adding a stack with a new triple and no
+    /// catalog entry would silently drop its build prerequisite — this catches it.
+    #[test]
+    fn every_stack_target_has_a_prerequisite() {
+        for v in VARIANTS {
+            for s in v.stacks {
+                let p = prereq(s.target).unwrap_or_else(|| {
+                    panic!("{}/{}: target '{}' has no PREREQS entry", v.id, s.id, s.target)
+                });
+                assert_eq!(p.need, Need::Build, "{}/{}: a target is a build prereq", v.id, s.id);
+            }
+        }
+    }
+
+    /// Every id referenced from a stack or a tool choice must resolve, and must
+    /// sit in the group that references it — a flash tool listed under
+    /// `build_prereqs` would print in the wrong section.
+    #[test]
+    fn referenced_prereq_ids_resolve_into_the_right_group() {
+        let check = |ids: &[&str], want: Need, what: &str| {
+            for id in ids {
+                let p = prereq(id).unwrap_or_else(|| panic!("{what}: unknown prerequisite '{id}'"));
+                assert_eq!(p.need, want, "{what}: '{id}' is in the wrong group");
+            }
+        };
+        for v in VARIANTS {
+            for s in v.stacks {
+                check(s.build_prereqs, Need::Build, &format!("{}/{} build", v.id, s.id));
+                check(s.flash_prereqs, Need::Flash, &format!("{}/{} flash", v.id, s.id));
+            }
+        }
+        for c in FLASHING_TOOLS {
+            check(c.prereqs, Need::Flash, &format!("flashing '{}'", c.id));
+        }
+        // Logging/framework choices are plain cargo dependencies — no host tool.
+        for cat in [ToolCategory::Logging, ToolCategory::Framework] {
+            for c in cat.catalog() {
+                assert!(c.prereqs.is_empty(), "{} '{}' should need no host tool", cat.flag(), c.id);
+            }
+        }
+    }
+
+    /// The arch↔toolchain rule, encoded. Xtensa is not a rustup target and must
+    /// be probed through the espup-installed `esp` toolchain; RISC-V and Cortex-M
+    /// no_std targets are ordinary rustup targets. (The ESP `std` targets are
+    /// neither — they are `build-std` targets, checked separately below.)
+    #[test]
+    fn xtensa_targets_need_espup_and_others_do_not() {
+        for v in VARIANTS {
+            for s in v.stacks {
+                let p = prereq(s.target).unwrap();
+                match (v.arch, s.is_std()) {
+                    (Arch::Xtensa, _) => {
+                        assert!(
+                            matches!(p.probe, Probe::XtensaToolchain(_)),
+                            "{}/{}: Xtensa must go through the esp toolchain, got {:?}",
+                            v.id, s.id, p.probe
+                        );
+                        assert!(
+                            p.install.contains("espup"),
+                            "{}/{}: Xtensa install command must use espup: {}",
+                            v.id, s.id, p.install
+                        );
+                    }
+                    // ESP `std` on RISC-V: a build-std target (nightly + rust-src),
+                    // and specifically NOT espup — espup's RISC-V support is on the
+                    // stable channel, which cannot do build-std.
+                    (Arch::RiscV, true) => {
+                        assert!(
+                            matches!(p.probe, Probe::RustupComponent { .. }),
+                            "{}/{}: RISC-V std is a build-std target, got {:?}",
+                            v.id, s.id, p.probe
+                        );
+                        assert!(
+                            !p.install.contains("espup"),
+                            "{}/{}: RISC-V std must not ask for espup: {}",
+                            v.id, s.id, p.install
+                        );
+                    }
+                    (Arch::RiscV, false) | (Arch::Arm, _) => {
+                        assert!(
+                            matches!(p.probe, Probe::RustupTarget(t) if t == s.target),
+                            "{}/{}: expected a plain rustup target, got {:?}",
+                            v.id, s.id, p.probe
+                        );
+                        assert_eq!(p.install, format!("rustup target add {}", s.target));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The flash route is a property of the board's bootloader (or, on esp-hal,
+    /// of the user's flashing choice) — pinned here against
+    /// `scripts/matrix.sh`, which is the script that actually flashed these
+    /// boards over USB with no SWD probe.
+    #[test]
+    fn flash_routes_match_the_verified_usb_routes() {
+        let route = |chip: &str, stack: &str| {
+            variant(chip).unwrap().stack(stack).unwrap().flash_prereqs
+        };
+        // RP2040/RP2350: picotool reads the ELF directly (BOOTSEL mass storage).
+        for (chip, stacks) in [
+            ("xiao-rp2040", ["rp2040-hal", "embassy-rp"]),
+            ("xiao-rp2350", ["rp235x-hal", "embassy-rp"]),
+        ] {
+            for s in stacks {
+                assert_eq!(route(chip, s), &["picotool"], "{chip}/{s}");
+            }
+        }
+        // nRF52840: ELF -> raw bin (rust-objcopy) -> UF2 (uf2conv.py).
+        for (chip, stacks) in [
+            ("xiao-nrf52840", ["nrf-hal", "embassy-nrf"]),
+            ("xiao-nrf52840-sense", ["nrf-hal", "embassy-nrf"]),
+        ] {
+            for s in stacks {
+                assert_eq!(route(chip, s), &["rust-objcopy", "uf2conv"], "{chip}/{s}");
+            }
+        }
+        // SAMD21: hf2 takes the ELF directly over HID.
+        assert_eq!(route("xiao-samd21", "atsamd-hal"), &["hf2"]);
+        // esp-idf: the template's cargo runner is espflash, and FLASHING is not a
+        // live axis there, so it is stack data.
+        assert_eq!(route("xiao-esp32c3", "esp-idf"), &["espflash"]);
+        // esp-hal: empty — the chosen flashing tool decides (see the model test).
+        assert!(route("xiao-esp32c3", "esp-hal").is_empty());
+        // Every non-ESP route is USB/UF2: no probe-rs, because there is no SWD probe.
+        for v in VARIANTS {
+            if v.is_esp() {
+                continue;
+            }
+            for s in v.stacks {
+                assert!(
+                    !s.flash_prereqs.contains(&"probe-rs"),
+                    "{}/{} default flash route must not need a debug probe",
+                    v.id, s.id
+                );
+            }
+        }
+    }
+
+    /// Only the ESP `std` stack carries extra build tools, and it carries the
+    /// three the ESP-IDF build genuinely needs on the host. cmake/ninja are
+    /// deliberately absent: esp-idf-sys installs them itself via `idf_tools.py`.
+    #[test]
+    fn only_esp_idf_declares_extra_build_tools() {
+        for v in VARIANTS {
+            for s in v.stacks {
+                if s.is_std() {
+                    assert_eq!(s.build_prereqs, &["ldproxy", "python3", "git"], "{}/{}", v.id, s.id);
+                } else {
+                    assert!(s.build_prereqs.is_empty(), "{}/{} needs no extra build tool", v.id, s.id);
+                }
+                for banned in ["cmake", "ninja"] {
+                    assert!(
+                        !s.build_prereqs.contains(&banned),
+                        "{banned} is bootstrapped by esp-idf-sys, not a host prerequisite"
+                    );
+                }
+            }
         }
     }
 

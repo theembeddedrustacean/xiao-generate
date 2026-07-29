@@ -106,6 +106,44 @@ pub fn uferris_body(id: &str) -> Option<&'static str> {
     })
 }
 
+/// Placeholder in the µFerris body for the `esp_alloc` heap size.
+pub const DRAM2_HEAP_BYTES: &str = "{{DRAM2_HEAP_BYTES}}";
+
+/// Size, in bytes, of the `.dram2_uninit` heap a µFerris project hands
+/// `esp_alloc`. `None` for a chip with no recorded figure.
+///
+/// This has to be per-chip. `dram2_seg` is a fixed window declared in esp-hal's
+/// linker script and its size differs between SoCs, so one shared literal cannot
+/// be correct everywhere — and emitting one anyway is precisely what broke the
+/// ESP32-C6 build. The old value, `66320`, is the C3's region to the byte; the
+/// C6's region is 784 bytes smaller, which was the exact reported overflow.
+///
+/// Nothing but `*(.dram2_uninit)` is placed in `dram2_seg`, and esp-alloc's
+/// macro expands to a bare `MaybeUninit<[u8; N]>` with no bookkeeping, so the
+/// emitted section size *equals* `N` and the region size is a hard ceiling.
+///
+/// | chip | `dram2_seg` | capacity | heap emitted | slack |
+/// |---|---|---:|---:|---:|
+/// | esp32c3 | `0x3FCCE400..0x3FCDE710` | `0x10310` | `0xFF00` | 1040 B |
+/// | esp32c6 | `0x4086E610..0x4087E610` | `0x10000` | `0xFC00` | 1024 B |
+///
+/// Each figure deliberately leaves ~1 KiB rather than consuming the region to
+/// the last byte. Saturating it is what produced this bug in the first place: a
+/// zero-slack fit re-breaks the link the moment anything else lands in the
+/// section, with no margin to absorb it. The lost kilobyte of heap is worth the
+/// margin — the µFerris bodies do not allocate meaningfully.
+///
+/// Only the µFerris-eligible chips need an entry; `uferris_bsp_chips_all_have_a_dram2_heap_size`
+/// keeps this table in step with the registry, so a newly-eligible variant fails
+/// the test suite rather than silently generating a wrong constant.
+pub fn dram2_heap_bytes(chip: &str) -> Option<u32> {
+    Some(match chip {
+        "esp32c3" => 0xFF00,
+        "esp32c6" => 0xFC00,
+        _ => return None,
+    })
+}
+
 /// Body for the ESP `std` (`esp-idf`) stack's synthetic `base` template: a std
 /// blink (via `esp-idf-hal`) on variants that carry an onboard LED, a std
 /// log-hello (via `esp-idf-svc`) otherwise. Both are adaptations of upstream
@@ -340,5 +378,79 @@ mod tests {
         // …and the catalog must carry the same caveat, so the CLI/TUI say it too.
         let e = crate::registry::editor("neovim").unwrap();
         assert!(e.caveat.is_some(), "the neovim catalog entry must carry a caveat");
+    }
+
+    /// Every variant that can actually generate a µFerris project must have a
+    /// `.dram2_uninit` heap size on file.
+    ///
+    /// This is the regression guard for the ESP32-C6 link failure: the body used
+    /// to carry one hardcoded `66320`, which is the ESP32-C3's `dram2_seg` to the
+    /// byte and overflows the C6's smaller region by 784 bytes. The failure mode
+    /// was silent at generation time and only surfaced as a linker error in the
+    /// user's project, so the check has to live here — making a newly-eligible
+    /// variant fail the suite rather than ship a constant sized for a different
+    /// chip.
+    ///
+    /// Variants carrying a `uferris_gap` are excluded: µFerris cannot be selected
+    /// for them at all, so there is no body to size. If a gap is ever lifted this
+    /// test starts failing, which is the intended prompt to look the figure up.
+    #[test]
+    fn uferris_capable_chips_all_have_a_dram2_heap_size() {
+        for v in crate::registry::VARIANTS
+            .iter()
+            .filter(|v| v.uferris_chip_feature.is_some() && v.uferris_gap.is_none())
+        {
+            assert!(
+                super::dram2_heap_bytes(v.chip).is_some(),
+                "variant '{}' can generate a µFerris project on chip '{}', but \
+                 `dram2_heap_bytes` has no entry for it — add one sized from that chip's \
+                 `dram2_seg` in esp-hal's `ld/{}/memory.x`",
+                v.id,
+                v.chip,
+                v.chip
+            );
+        }
+    }
+
+    /// The µFerris body must carry the placeholder, not a baked-in number.
+    ///
+    /// Without this, someone re-inlining a literal (say, when syncing the body
+    /// against an upstream example) reintroduces the exact chip-independent
+    /// constant this whole mechanism exists to prevent — and it would generate
+    /// and build fine on whichever chip the number came from.
+    #[test]
+    fn the_uferris_body_sizes_its_heap_from_the_placeholder() {
+        let body = super::uferris_body("blinky").expect("blinky µFerris body");
+        assert!(
+            body.contains(super::DRAM2_HEAP_BYTES),
+            "the µFerris body must size its heap with {} rather than a literal",
+            super::DRAM2_HEAP_BYTES
+        );
+        assert!(
+            !body.contains("66320"),
+            "the µFerris body still carries the old chip-independent heap size 66320"
+        );
+    }
+
+    /// Each recorded heap size must actually fit its chip's `dram2_seg`, with
+    /// real slack left over. Capacities are read off esp-hal's linker scripts:
+    /// C3 `0x3FCDE710-0x3FCCE400 = 0x10310`, C6 `0x4087E610-0x4086E610 = 0x10000`.
+    #[test]
+    fn recorded_dram2_heap_sizes_fit_their_region_with_slack() {
+        for (chip, capacity) in [("esp32c3", 0x10310_u32), ("esp32c6", 0x10000_u32)] {
+            let heap = super::dram2_heap_bytes(chip).expect("chip has a recorded heap size");
+            assert!(
+                heap < capacity,
+                "{chip}: heap {heap:#X} does not fit dram2_seg {capacity:#X}"
+            );
+            // A zero-slack fit is what broke the C6; require real margin.
+            assert!(
+                capacity - heap >= 1024,
+                "{chip}: heap {heap:#X} leaves only {} bytes of dram2_seg ({capacity:#X}); \
+                 keep at least 1 KiB so a later addition to .dram2_uninit does not re-break \
+                 the link",
+                capacity - heap
+            );
+        }
     }
 }

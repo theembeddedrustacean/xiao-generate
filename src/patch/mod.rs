@@ -127,7 +127,26 @@ fn install_main(cfg: &Config) -> Result<()> {
         }
     }
 
-    let rendered = templates::render(body, cfg.variant.led);
+    let mut rendered = templates::render(body, cfg.variant.led);
+
+    // The µFerris body sizes its `.dram2_uninit` heap from a per-chip figure —
+    // `dram2_seg` is a different size on every SoC, so there is no one literal
+    // that links everywhere. Resolve it here rather than defaulting: a missing
+    // entry is a registry/template mismatch we want to fail on now, with the
+    // fix spelled out, instead of emitting a constant that overflows the region
+    // at link time in the user's project.
+    if rendered.contains(templates::DRAM2_HEAP_BYTES) {
+        let bytes = templates::dram2_heap_bytes(cfg.variant.chip).with_context(|| {
+            format!(
+                "no `.dram2_uninit` heap size recorded for chip '{}' (variant '{}'), which the \
+                 µFerris template needs. Add it to `templates::dram2_heap_bytes` — the value is \
+                 the size of that chip's `dram2_seg` in esp-hal's `ld/{}/memory.x`, less ~1 KiB \
+                 of slack.",
+                cfg.variant.chip, cfg.variant.id, cfg.variant.chip
+            )
+        })?;
+        rendered = rendered.replace(templates::DRAM2_HEAP_BYTES, &bytes.to_string());
+    }
 
     // esp-generate/uferris scaffold the app entry at src/bin/main.rs; the
     // esp-idf-template std layout and the non-ESP scaffold (single bin) both use

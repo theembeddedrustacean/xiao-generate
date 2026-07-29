@@ -39,18 +39,33 @@ pub fn option_groups_apply(cfg: &Config) -> bool {
         && registry::is_base_template(&cfg.template_id)
 }
 
-/// The reason a whole universal toolchain section (Flashing / Logging /
-/// Framework) is a *disabled* (non-editable) axis for a stack, or `None` if it is
-/// a live, editable axis. Derived purely from the stack's backend (R4): only the
-/// esp-hal backend wires these toolchain choices; the esp-idf stack's toolchain is
-/// fixed by its template, and the non-ESP backends are not implemented until M4.
-/// (The universal categories are still shown on those stacks — greyed — so the
-/// device-agnostic picture is always visible.)
-pub fn section_grey_reason(stack: &Stack) -> Option<&'static str> {
+/// Whether one universal toolchain category is a *live* axis for a stack — i.e.
+/// changing it actually changes what gets generated. Derived purely from the
+/// backend (R4):
+///  - **esp-hal**: all three (they become esp-generate `-o` flags).
+///  - **esp-idf**: none (the template fixes the toolchain).
+///  - **non-ESP scaffold (M4)**: FRAMEWORK only. `none` emits the bare-metal
+///    body, `embassy` the executor body + the HAL's time driver. Flashing and
+///    logging are not wired for non-ESP yet — the generated project ships no
+///    runner and no logging frontend — so they stay display-only.
+pub fn category_live(stack: &Stack, cat: ToolCategory) -> bool {
     match stack.backend {
-        Backend::EspGenerate => None,
+        Backend::EspGenerate => true,
+        Backend::CargoGenerate => false,
+        Backend::NonEspScaffold => matches!(cat, ToolCategory::Framework),
+    }
+}
+
+/// The reason one universal toolchain category is not editable for a stack, or
+/// `None` when it is live. Counterpart of [`category_live`].
+pub fn category_grey_reason(stack: &Stack, cat: ToolCategory) -> Option<&'static str> {
+    if category_live(stack, cat) {
+        return None;
+    }
+    match stack.backend {
         Backend::CargoGenerate => Some("configured by the esp-idf template"),
-        Backend::BatteryPack => Some("until M4 (non-ESP backend)"),
+        Backend::NonEspScaffold => Some("chosen by your own tooling, not baked into the project"),
+        Backend::EspGenerate => None,
     }
 }
 
@@ -65,6 +80,10 @@ pub fn section_grey_reason(stack: &Stack) -> Option<&'static str> {
 ///     greys `log` when the flashing tool is probe-rs).
 /// `sibling_esp_opts` is the union of the other two categories' currently-selected
 /// internal esp flags (only meaningful on esp-hal; pass `&[]` elsewhere).
+///
+/// A third source (M4): the stack lists the choice as real for the device but
+/// declares it a *gap* it cannot generate — `embassy` on a blocking HAL, `rtic`
+/// anywhere. That reason is more useful than a flat "not supported".
 pub fn choice_grey_reason(
     variant: &Variant,
     stack: &Stack,
@@ -74,6 +93,11 @@ pub fn choice_grey_reason(
 ) -> Option<String> {
     if !stack.support(cat).contains(&choice.id) {
         return Some(unsupported_reason(variant, stack, cat, choice));
+    }
+    if matches!(cat, ToolCategory::Framework) {
+        if let Some(reason) = stack.framework_gap(choice.id) {
+            return Some(reason.to_string());
+        }
     }
     if matches!(stack.backend, Backend::EspGenerate) {
         let mut candidate: Vec<&str> = sibling_esp_opts.to_vec();
@@ -147,8 +171,12 @@ pub struct Config {
 pub enum Readiness {
     /// Backend implemented — generation will run.
     Ready,
-    /// Structurally valid, but generation is gated (e.g. the non-ESP
-    /// battery-pack backend, not wired until M4/M6). Carries the message to show.
+    /// Structurally valid, but generation is gated because the backend itself is
+    /// not wired yet. Nothing is in this state since M4 landed the non-ESP
+    /// scaffold (all three backends are implemented); the mechanism is kept for
+    /// the next backend that ships behind its registry data, and the TUI still
+    /// renders it.
+    #[allow(dead_code)]
     Gated(String),
 }
 
@@ -228,29 +256,14 @@ impl Config {
             None => variant.default_stack(),
         };
 
-        // --- backend availability (esp-generate = M1, cargo-generate = M5;
-        //     battery-pack arrives at M4) ---
-        // Headless: hard error. TUI: soften to `Gated` so the selection still
-        // resolves for the summary/parity display, then refuse to generate.
-        let mut readiness = Readiness::Ready;
-        if matches!(stack.backend, Backend::BatteryPack) {
-            let msg = format!(
-                "variant '{}' uses the embedded-battery-pack backend, which is not implemented until M4 (P1). \
-                 Implemented variants: {}",
-                variant.id,
-                registry::VARIANTS
-                    .iter()
-                    .filter(|v| v.is_esp())
-                    .map(|v| v.id)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            if for_tui {
-                readiness = Readiness::Gated(msg);
-            } else {
-                return Err(msg);
-            }
-        }
+        // --- backend availability ---
+        // All three backends are implemented (esp-generate = M1, cargo-generate
+        // = M5, the non-ESP direct scaffold = M4), so nothing is gated at the
+        // backend level any more. The `Gated` path is kept for the next backend
+        // that lands ahead of its stacks; narrower gaps (templates, frameworks,
+        // µFerris) are hard errors in both modes, exactly as before.
+        let _ = for_tui;
+        let readiness = Readiness::Ready;
 
         // --- µFerris eligibility + power_board implies uferris ---
         let uferris_requested = raw.uferris || raw.power_board;
@@ -394,7 +407,6 @@ impl Config {
         // is mapped to esp-generate `-o` flags INTERNALLY by `esp_options()`; those
         // flag names never leave this module. A choice not in the stack's support
         // list (e.g. RTIC on esp-hal) is rejected with a support reason.
-        let axis_live = matches!(stack.backend, Backend::EspGenerate);
         let resolve_cat =
             |cat: ToolCategory, raw_val: Option<&str>| -> Result<&'static ToolChoice, String> {
                 match raw_val {
@@ -424,25 +436,34 @@ impl Config {
                     }
                 }
             };
-        if !axis_live {
-            for (cat, val) in [
-                (ToolCategory::Flashing, &raw.flashing),
-                (ToolCategory::Logging, &raw.logging),
-                (ToolCategory::Framework, &raw.framework),
-            ] {
-                if val.is_some() {
-                    return Err(format!(
-                        "--{} applies only to the esp-hal (no_std) stack; the '{}' stack's \
-                         toolchain is not user-selectable here",
-                        cat.flag(),
-                        stack.id
-                    ));
-                }
+        for (cat, val) in [
+            (ToolCategory::Flashing, &raw.flashing),
+            (ToolCategory::Logging, &raw.logging),
+            (ToolCategory::Framework, &raw.framework),
+        ] {
+            if val.is_some() && !category_live(stack, cat) {
+                return Err(format!(
+                    "--{} does not apply to the '{}' stack ({}); it is not user-selectable here",
+                    cat.flag(),
+                    stack.id,
+                    category_grey_reason(stack, cat).unwrap_or("not a live axis")
+                ));
             }
         }
         let flashing = resolve_cat(ToolCategory::Flashing, raw.flashing.as_deref())?;
         let logging = resolve_cat(ToolCategory::Logging, raw.logging.as_deref())?;
         let framework = resolve_cat(ToolCategory::Framework, raw.framework.as_deref())?;
+
+        // A framework the stack lists for the device but cannot generate is a
+        // declared gap (registry data, compile-verified) — refuse rather than
+        // silently emit a project that does not use it. This is what rejects
+        // `embassy` on a blocking HAL and `rtic` everywhere.
+        if let Some(reason) = stack.framework_gap(framework.id) {
+            return Err(format!(
+                "framework '{}' is not available on the '{}' stack of '{}': {reason}",
+                framework.id, stack.id, variant.id
+            ));
+        }
 
         let cfg = Config {
             variant,
@@ -555,18 +576,25 @@ pub fn equivalent_command(cfg: &Config) -> String {
         parts.push(format!("--template {}", cfg.template_id));
     }
 
-    // Universal toolchain flags — only on the esp-hal base project (the live
-    // axis), and only when a choice differs from the universal default (keep the
-    // command terse but faithful/runnable). No esp-generate `-o` ever appears.
-    if option_groups_apply(cfg) {
-        if cfg.flashing.id != ToolCategory::Flashing.default_choice().id {
-            parts.push(format!("--flashing {}", cfg.flashing.id));
-        }
-        if cfg.logging.id != ToolCategory::Logging.default_choice().id {
-            parts.push(format!("--logging {}", cfg.logging.id));
-        }
-        if cfg.framework.id != ToolCategory::Framework.default_choice().id {
-            parts.push(format!("--framework {}", cfg.framework.id));
+    // Universal toolchain flags — only for categories that are a live axis on
+    // this stack (all three on the esp-hal base project; FRAMEWORK on the non-ESP
+    // scaffold), and only when a choice differs from the universal default (keep
+    // the command terse but faithful/runnable). No esp-generate `-o` ever appears.
+    let esp_groups = option_groups_apply(cfg);
+    for (cat, chosen) in [
+        (ToolCategory::Flashing, cfg.flashing),
+        (ToolCategory::Logging, cfg.logging),
+        (ToolCategory::Framework, cfg.framework),
+    ] {
+        // On esp-hal a component add-on locks the groups, so they must not be
+        // re-emitted; elsewhere liveness alone decides.
+        let live = if matches!(cfg.stack.backend, Backend::EspGenerate) {
+            esp_groups
+        } else {
+            category_live(cfg.stack, cat)
+        };
+        if live && chosen.id != cat.default_choice().id {
+            parts.push(format!("--{} {}", cat.flag(), chosen.id));
         }
     }
 
@@ -678,10 +706,103 @@ mod tests {
         assert!(Config::resolve(raw("xiao-nope")).is_err());
     }
 
+    // ---- M4: non-ESP resolution ----
+
     #[test]
-    fn non_esp_variant_rejected_until_m4() {
-        let e = Config::resolve(raw("xiao-rp2040")).unwrap_err();
-        assert!(e.contains("M4"), "got: {e}");
+    fn non_esp_variants_resolve_headlessly() {
+        // The direct scaffold is implemented, so every non-ESP variant resolves
+        // from `--chip` alone, on its default (blocking-HAL) stack, bare-metal.
+        for (chip, stack, target) in [
+            ("xiao-rp2040", "rp2040-hal", "thumbv6m-none-eabi"),
+            ("xiao-rp2350", "rp235x-hal", "thumbv8m.main-none-eabihf"),
+            ("xiao-nrf52840", "nrf-hal", "thumbv7em-none-eabihf"),
+            ("xiao-nrf52840-sense", "nrf-hal", "thumbv7em-none-eabihf"),
+            ("xiao-samd21", "atsamd-hal", "thumbv6m-none-eabi"),
+        ] {
+            let c = Config::resolve(raw(chip)).unwrap_or_else(|e| panic!("{chip}: {e}"));
+            assert_eq!(c.stack.id, stack);
+            assert_eq!(c.stack.target, target);
+            assert_eq!(c.template_id, "base-blink");
+            assert_eq!(c.framework.id, "none");
+            assert!(c.stack.scaffold.is_some(), "{chip} must carry scaffold data");
+        }
+    }
+
+    #[test]
+    fn embassy_framework_accepted_on_an_embassy_hal() {
+        for (chip, stack) in [
+            ("xiao-rp2040", "embassy-rp"),
+            ("xiao-rp2350", "embassy-rp"),
+            ("xiao-nrf52840", "embassy-nrf"),
+            ("xiao-nrf52840-sense", "embassy-nrf"),
+        ] {
+            let mut r = raw(chip);
+            r.stack = Some(stack.to_string());
+            r.framework = Some("embassy".to_string());
+            let c = Config::resolve(r).unwrap_or_else(|e| panic!("{chip}/{stack}: {e}"));
+            assert_eq!(c.framework.id, "embassy");
+        }
+    }
+
+    #[test]
+    fn embassy_framework_refused_on_a_blocking_hal() {
+        // The M4 rule: framework = embassy REQUIRES an embassy HAL. Compile-
+        // verified — a blocking HAL cannot get a working embassy-time driver.
+        for (chip, stack, pointer) in [
+            ("xiao-rp2040", "rp2040-hal", "embassy-rp"),
+            ("xiao-rp2350", "rp235x-hal", "embassy-rp"),
+            ("xiao-nrf52840", "nrf-hal", "embassy-nrf"),
+        ] {
+            let mut r = raw(chip);
+            r.stack = Some(stack.to_string());
+            r.framework = Some("embassy".to_string());
+            let e = Config::resolve(r).unwrap_err();
+            assert!(e.contains("embassy HAL"), "{chip}/{stack} reason: {e}");
+            assert!(e.contains(pointer), "{chip}/{stack} should point at {pointer}: {e}");
+        }
+    }
+
+    #[test]
+    fn rtic_framework_refused_on_non_esp_with_a_gap_reason() {
+        let mut r = raw("xiao-rp2040");
+        r.framework = Some("rtic".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("RTIC"), "got: {e}");
+        assert!(e.contains("not implemented"), "got: {e}");
+    }
+
+    #[test]
+    fn flashing_and_logging_are_not_a_live_axis_on_non_esp() {
+        for (flag, val) in [("flashing", "probe-rs"), ("logging", "defmt")] {
+            let mut r = raw("xiao-rp2040");
+            match flag {
+                "flashing" => r.flashing = Some(val.to_string()),
+                _ => r.logging = Some(val.to_string()),
+            }
+            let e = Config::resolve(r).unwrap_err();
+            assert!(e.contains(&format!("--{flag}")), "got: {e}");
+        }
+        // …but the framework axis IS live there.
+        let rp = registry::variant("xiao-rp2040").unwrap().default_stack();
+        assert!(category_live(rp, ToolCategory::Framework));
+        assert!(!category_live(rp, ToolCategory::Flashing));
+        assert!(!category_live(rp, ToolCategory::Logging));
+    }
+
+    #[test]
+    fn non_esp_choice_grey_reason_reports_the_framework_gap() {
+        let rp = registry::variant("xiao-rp2040").unwrap();
+        let blocking = rp.stack("rp2040-hal").unwrap();
+        let embassy_stack = rp.stack("embassy-rp").unwrap();
+        let embassy = registry::tool_choice(ToolCategory::Framework, "embassy").unwrap();
+        let none = registry::tool_choice(ToolCategory::Framework, "none").unwrap();
+        assert!(
+            choice_grey_reason(rp, blocking, ToolCategory::Framework, embassy, &[])
+                .unwrap()
+                .contains("embassy HAL")
+        );
+        assert!(choice_grey_reason(rp, embassy_stack, ToolCategory::Framework, embassy, &[]).is_none());
+        assert!(choice_grey_reason(rp, blocking, ToolCategory::Framework, none, &[]).is_none());
     }
 
     #[test]
@@ -861,13 +982,13 @@ mod tests {
 
     #[test]
     fn parity_non_esp_variant_via_tui_resolution() {
-        // Non-ESP resolves for the TUI (gated), and the equivalent command is
-        // still exact — rp2040-hal is the default stack, base-blink the default
-        // template, so neither appears.
+        // Non-ESP is Ready since M4, and the equivalent command is exact —
+        // rp2040-hal is the default stack, base-blink the default template and
+        // `none` the default framework, so none of them appears.
         let mut r = raw("xiao-rp2040");
         r.out_dir = Some(PathBuf::from("proj"));
         let (c, readiness) = Config::resolve_for_tui(r).unwrap();
-        assert!(matches!(readiness, Readiness::Gated(_)), "non-ESP must be gated");
+        assert!(matches!(readiness, Readiness::Ready), "non-ESP generates since M4");
         assert_eq!(equivalent_command(&c), "xiao-generate --chip xiao-rp2040");
     }
 
@@ -880,6 +1001,21 @@ mod tests {
         assert_eq!(
             equivalent_command(&c),
             "xiao-generate --chip xiao-rp2040 --stack embassy-rp"
+        );
+    }
+
+    #[test]
+    fn parity_non_esp_framework_flag_round_trips() {
+        // FRAMEWORK is the live toolchain axis on the non-ESP scaffold, so a
+        // non-default choice must appear in the reproducible command.
+        let mut r = raw("xiao-nrf52840");
+        r.stack = Some("embassy-nrf".to_string());
+        r.framework = Some("embassy".to_string());
+        r.out_dir = Some(PathBuf::from("proj"));
+        let c = Config::resolve(r).unwrap();
+        assert_eq!(
+            equivalent_command(&c),
+            "xiao-generate --chip xiao-nrf52840 --stack embassy-nrf --framework embassy"
         );
     }
 
@@ -1042,7 +1178,8 @@ mod tests {
         r.stack = Some("esp-idf".to_string());
         r.framework = Some("embassy".to_string());
         let e = Config::resolve(r).unwrap_err();
-        assert!(e.contains("--framework applies only"), "got: {e}");
+        assert!(e.contains("--framework does not apply"), "got: {e}");
+        assert!(e.contains("esp-idf template"), "should carry the reason: {e}");
     }
 
     #[test]
@@ -1059,17 +1196,26 @@ mod tests {
     }
 
     #[test]
-    fn section_grey_reasons_are_backend_derived() {
+    fn category_liveness_is_backend_derived() {
         let c6 = registry::variant("xiao-esp32c6").unwrap();
         let esp_hal = c6.stack("esp-hal").unwrap();
         let esp_idf = c6.stack("esp-idf").unwrap();
         let rp = registry::variant("xiao-rp2040").unwrap().default_stack();
-        // Live editable axis only on esp-hal.
-        assert!(section_grey_reason(esp_hal).is_none());
-        // esp-idf → template-owned.
-        assert_eq!(section_grey_reason(esp_idf), Some("configured by the esp-idf template"));
-        // non-ESP → gated until M4.
-        assert_eq!(section_grey_reason(rp), Some("until M4 (non-ESP backend)"));
+        for cat in ToolCategory::ALL {
+            // esp-hal → every category is a live, editable axis.
+            assert!(category_live(esp_hal, cat));
+            assert!(category_grey_reason(esp_hal, cat).is_none());
+            // esp-idf → template-owned, every category greyed.
+            assert!(!category_live(esp_idf, cat));
+            assert!(category_grey_reason(esp_idf, cat).is_some());
+        }
+        // non-ESP (M4) → FRAMEWORK is live; flashing/logging are not baked into
+        // the generated project, so they stay greyed.
+        assert!(category_live(rp, ToolCategory::Framework));
+        assert!(category_grey_reason(rp, ToolCategory::Framework).is_none());
+        assert!(!category_live(rp, ToolCategory::Flashing));
+        assert!(category_grey_reason(rp, ToolCategory::Flashing).is_some());
+        assert!(!category_live(rp, ToolCategory::Logging));
     }
 
     #[test]

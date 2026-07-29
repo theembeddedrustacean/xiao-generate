@@ -1,0 +1,38 @@
+//! Blink the Seeeduino XIAO (SAMD21) onboard user LED via the `xiao_m0` BSP.
+//!
+//! Source: atsamd-rs/atsamd `boards/xiao_m0/examples/blink.rs`
+//! (provenance 06710c7bc322eeae394426bd623b802118577a7a), verbatim.
+//!
+//! No pin substitution: the board crate owns the LED (`Led0` == PA17), which is
+//! why this stack goes through the BSP rather than raw `atsamd-hal`.
+#![no_main]
+#![no_std]
+
+extern crate panic_halt;
+
+use hal::{clock::GenericClockController, delay::Delay, prelude::*};
+use pac::{CorePeripherals, Peripherals};
+
+use bsp::{entry, hal, pac, Led0};
+use xiao_m0 as bsp;
+
+#[entry]
+fn main() -> ! {
+    let mut peripherals = Peripherals::take().unwrap();
+    let core = CorePeripherals::take().unwrap();
+    let mut clocks = GenericClockController::with_external_32kosc(
+        peripherals.GCLK,
+        &mut peripherals.PM,
+        &mut peripherals.SYSCTRL,
+        &mut peripherals.NVMCTRL,
+    );
+    let pins = bsp::Pins::new(peripherals.PORT);
+
+    let mut delay = Delay::new(core.SYST, &mut clocks);
+    let mut led0: Led0 = pins.led0.into_push_pull_output();
+
+    loop {
+        delay.delay_ms(200u8);
+        led0.toggle().unwrap();
+    }
+}

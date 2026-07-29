@@ -87,7 +87,11 @@ fn install_main(cfg: &Config) -> Result<()> {
     // `extra_crates` in `add_dependencies`; nothing else is layered on top.
     // Component add-ons and µFerris still inject their bodies below; the std
     // (CargoGenerate) path is unchanged.
-    if matches!(cfg.stack.backend, Backend::EspGenerate)
+    // The same rule holds for the non-ESP direct scaffold (M4): it writes the
+    // base `src/main.rs` for the resolved (chip, stack, framework) cell itself
+    // from a compile-verified body, so there is nothing to layer on for a base
+    // project. Component add-ons fall through and overwrite it below.
+    if matches!(cfg.stack.backend, Backend::EspGenerate | Backend::NonEspScaffold)
         && cfg.uferris.is_none()
         && registry::is_base_template(&cfg.template_id)
     {
@@ -95,6 +99,7 @@ fn install_main(cfg: &Config) -> Result<()> {
     }
 
     let is_std = matches!(cfg.stack.backend, Backend::CargoGenerate);
+    let is_nonesp = matches!(cfg.stack.backend, Backend::NonEspScaffold);
 
     let body = if cfg.uferris.is_some() {
         templates::uferris_body(&cfg.template_id)
@@ -125,8 +130,9 @@ fn install_main(cfg: &Config) -> Result<()> {
     let rendered = templates::render(body, cfg.variant.led);
 
     // esp-generate/uferris scaffold the app entry at src/bin/main.rs; the
-    // esp-idf-template std layout uses src/main.rs.
-    let main_path = if is_std {
+    // esp-idf-template std layout and the non-ESP scaffold (single bin) both use
+    // src/main.rs.
+    let main_path = if is_std || is_nonesp {
         cfg.out_dir.join("src").join("main.rs")
     } else {
         cfg.out_dir.join("src").join("bin").join("main.rs")

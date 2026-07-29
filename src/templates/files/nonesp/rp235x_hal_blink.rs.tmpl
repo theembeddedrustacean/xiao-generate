@@ -1,0 +1,70 @@
+//! Blink the XIAO RP2350's onboard user LED with the blocking `rp235x-hal`.
+//!
+//! Source: rp-rs/rp235x-project-template `src/main.rs` (compile-verified via
+//! `cargo generate` in research/m4-impl-plan.md §0 #2), with the defmt/probe
+//! transport swapped for `panic-halt` and the LED pin taken from the registry.
+#![no_std]
+#![no_main]
+
+use embedded_hal::digital::OutputPin;
+use hal::pac;
+use panic_halt as _;
+use rp235x_hal::clocks::init_clocks_and_plls;
+use rp235x_hal::{self as hal, entry, Clock};
+
+/// Tell the RP2350 boot ROM about this application. The RP2350 has no 2nd-stage
+/// bootloader blob; it reads this block out of the `.start_block` section.
+#[link_section = ".start_block"]
+#[used]
+pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+
+/// External crystal on the XIAO RP2350.
+const XTAL_FREQ_HZ: u32 = 12_000_000u32;
+
+#[entry]
+fn main() -> ! {
+    let mut pac = pac::Peripherals::take().unwrap();
+    let core = cortex_m::Peripherals::take().unwrap();
+    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
+    let sio = hal::Sio::new(pac.SIO);
+
+    let clocks = init_clocks_and_plls(
+        XTAL_FREQ_HZ,
+        pac.XOSC,
+        pac.CLOCKS,
+        pac.PLL_SYS,
+        pac.PLL_USB,
+        &mut pac.RESETS,
+        &mut watchdog,
+    )
+    .ok()
+    .unwrap();
+
+    let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
+
+    let pins = hal::gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
+
+    // XIAO RP2350 onboard user LED.
+    let mut led_pin = pins.gpio{{LED_GPIO}}.into_push_pull_output();
+
+    loop {
+        led_pin.set_high().unwrap();
+        delay.delay_ms(500);
+        led_pin.set_low().unwrap();
+        delay.delay_ms(500);
+    }
+}
+
+/// Program metadata for `picotool info`.
+#[link_section = ".bi_entries"]
+#[used]
+pub static PICOTOOL_ENTRIES: [rp235x_hal::binary_info::EntryAddr; 3] = [
+    rp235x_hal::binary_info::rp_cargo_bin_name!(),
+    rp235x_hal::binary_info::rp_cargo_version!(),
+    rp235x_hal::binary_info::rp_program_build_attribute!(),
+];

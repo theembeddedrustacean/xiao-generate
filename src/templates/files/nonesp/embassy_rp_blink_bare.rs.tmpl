@@ -1,0 +1,30 @@
+//! Blink the XIAO RP2040 / RP2350's onboard user LED with the `embassy-rp` HAL
+//! and NO async executor (`--framework none`).
+//!
+//! The embassy HAL is usable on its own: `embassy_rp::init()` works outside any
+//! executor, `Output` is a blocking GPIO type, and the `rt` feature (not the
+//! executor) is what supplies the vector table. Because there is no
+//! `embassy-time` in the graph, the project must NOT enable embassy-rp's
+//! `time-driver` feature — see research/hal-framework-matrix.md cell 7, which is
+//! where this body was compile-verified. It has no upstream equivalent (every
+//! embassy example runs under the executor).
+#![no_std]
+#![no_main]
+
+use embassy_rp::gpio::{Level, Output};
+use panic_halt as _;
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    let p = embassy_rp::init(Default::default());
+
+    // XIAO onboard user LED (GPIO from the xiao-generate registry).
+    let mut led = Output::new(p.PIN_{{LED_GPIO}}, Level::{{LED_INIT_LEVEL}});
+
+    loop {
+        led.set_high();
+        cortex_m::asm::delay(12_000_000);
+        led.set_low();
+        cortex_m::asm::delay(12_000_000);
+    }
+}

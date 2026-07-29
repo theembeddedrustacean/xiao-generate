@@ -200,9 +200,14 @@ fn print_chips() {
         } else {
             "µFerris: no"
         };
-        println!("  {:<22} P{}  {:<18} {}", v.id, v.priority, stacks, uf);
+        let family = if v.is_esp() { "ESP" } else { "Cortex-M" };
+        println!("  {:<22} P{}  {:<9} {:<26} {}", v.id, v.priority, family, stacks, uf);
     }
-    println!("\nESP variants implement the esp-hal (no_std) and esp-idf (std) stacks.");
+    println!(
+        "\nESP variants implement the esp-hal (no_std) and esp-idf (std) stacks; the Cortex-M \
+         variants\nimplement a blocking-HAL stack and, where one exists, an embassy-HAL stack \
+         (see --list-stacks)."
+    );
 }
 
 fn print_stacks(chip: Option<&str>) {
@@ -212,12 +217,26 @@ fn print_stacks(chip: Option<&str>) {
                 println!("Stacks for {} ({}):\n", v.display, v.id);
                 for (i, s) in v.stacks.iter().enumerate() {
                     let default = if i == 0 { "  [default]" } else { "" };
-                    let impl_note = match s.backend {
-                        registry::Backend::BatteryPack => "  (backend not implemented until M4)",
-                        _ => "",
-                    };
-                    println!("  {:<10} {}{}{}", s.id, s.display, default, impl_note);
-                    println!("             target: {}", s.target);
+                    println!("  {:<12} {}{}", s.id, s.display, default);
+                    println!("               target: {}", s.target);
+                    // Frameworks are a live axis on the non-ESP stacks (M4) and on
+                    // esp-hal; show which ones this stack can actually generate,
+                    // and why the rest can't.
+                    if !s.frameworks.is_empty() {
+                        let available = s
+                            .frameworks
+                            .iter()
+                            .filter(|f| s.framework_gap(f).is_none())
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("               frameworks: {available}");
+                        for f in s.frameworks {
+                            if let Some(reason) = s.framework_gap(f) {
+                                println!("                 {f}: [gap] {reason}");
+                            }
+                        }
+                    }
                 }
             }
             None => eprintln!("unknown chip '{id}' (see --list-chips)"),
@@ -311,12 +330,20 @@ fn print_summary(cfg: &Config) {
         println!("  flashing:     {}", cfg.flashing.display);
         println!("  logging:      {}", cfg.logging.display);
         println!("  framework:    {}", cfg.framework.display);
+    } else if model::category_live(cfg.stack, registry::ToolCategory::Framework) {
+        // Non-ESP scaffold: framework is the one live toolchain axis.
+        println!("  framework:    {}", cfg.framework.display);
     }
     println!("  µFerris BSP:  {}", uferris_line);
     println!("\n  equivalent command:");
     println!("    {}", model::equivalent_command(cfg));
     println!("\nNext steps:");
     println!("  cd {}", cfg.out_dir.display());
+    if !cfg.stack.backend.is_esp() {
+        // The non-ESP scaffold pins the target in .cargo/config.toml but cannot
+        // install it for the user.
+        println!("  rustup target add {}", cfg.stack.target);
+    }
     println!("  cargo build");
     if cfg.variant.arch == registry::Arch::Xtensa {
         println!("  (ESP32-S3 is Xtensa — needs the `esp` toolchain via espup)");

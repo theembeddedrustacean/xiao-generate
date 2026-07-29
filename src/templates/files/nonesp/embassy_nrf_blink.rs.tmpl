@@ -1,0 +1,29 @@
+//! Blink the XIAO nRF52840's onboard user LED with `embassy-nrf` + the embassy
+//! executor (`--framework embassy`).
+//!
+//! Source: embassy-rs/embassy `examples/nrf52840/src/bin/blinky.rs`
+//! (provenance ef19efcdb3a8948a607a0e1852ed74d4323fa11f) with the pin moved
+//! from the dev-kit's `P0_13` to the XIAO's LED and defmt logging removed.
+//! Compile-verified: research/hal-framework-matrix.md cell 4.
+#![no_std]
+#![no_main]
+
+use embassy_executor::Spawner;
+use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_time::Timer;
+use panic_halt as _;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
+
+    // XIAO nRF52840 onboard user LED (common anode -> Level::High is off).
+    let mut led = Output::new(p.P0_{{LED_GPIO}}, Level::{{LED_INIT_LEVEL}}, OutputDrive::Standard);
+
+    loop {
+        led.set_low();
+        Timer::after_millis(500).await;
+        led.set_high();
+        Timer::after_millis(500).await;
+    }
+}

@@ -32,8 +32,10 @@
 //! through `Config::resolve_for_tui` (shared validation, never duplicated — R4/M2),
 //! and hands a resolved `Config` back to `main` for generation on the one shared
 //! generation path. All grey-out decisions derive from registry data via the pure
-//! helpers in `model` (`section_grey_reason`, `choice_grey_reason`) — no fabricated
-//! data, no per-variant UI logic.
+//! helpers in `model` (`category_live` / `category_grey_reason` for the section
+//! headers, `choice_grey_reason` for individual rows) — no fabricated data, no
+//! per-variant UI logic. Section greying is PER-CATEGORY: on the non-ESP scaffold
+//! FRAMEWORK is a live axis while flashing and logging are display-only.
 //!
 //! The draw functions are pure over `(&App, &Theme)`, so the whole page is
 //! rendered headless into a `TestBackend` buffer in the tests below.
@@ -163,7 +165,7 @@ impl Theme {
 // leave focus stranded.
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
     Device,
     Stack(usize),
@@ -249,9 +251,13 @@ impl App {
         model::uferris_available(self.variant(), self.current_stack())
     }
 
-    /// Whether the three toolchain sections are a live, editable axis (esp-hal).
-    fn axis_live(&self) -> bool {
-        model::section_grey_reason(self.current_stack()).is_none()
+    /// Whether ONE toolchain section is a live, editable axis for the current
+    /// stack. Per-category, not whole-stack: on the non-ESP scaffold FRAMEWORK is
+    /// live (embassy is a real, generatable choice on the embassy HALs) while
+    /// flashing and logging are display-only. esp-hal: all three live; esp-idf:
+    /// none. Derived from `model::category_live` — the TUI fabricates nothing.
+    fn cat_live(&self, cat: ToolCategory) -> bool {
+        model::category_live(self.current_stack(), cat)
     }
 
     fn cat_idx(&self, cat: ToolCategory) -> usize {
@@ -335,23 +341,21 @@ impl App {
         for i in 0..self.variant().stacks.len() {
             rows.push(Row::Stack(i));
         }
-        // The three toolchain sections are focusable only on the live esp-hal axis
-        // AND with µFerris off — µFerris supplies its own toolchain, so those picks
-        // don't apply and the sections go inactive (dimmed, no selection).
-        if self.axis_live() && !self.uferris_on {
-            for i in 0..ToolCategory::Flashing.catalog().len() {
-                if self.choice_grey(ToolCategory::Flashing, i).is_none() {
-                    rows.push(Row::Flashing(i));
+        // A toolchain section contributes focusable rows only when THAT category is
+        // a live axis for the stack (esp-hal: all three; non-ESP: FRAMEWORK only;
+        // esp-idf: none) AND µFerris is off — µFerris supplies its own toolchain, so
+        // those picks don't apply and all three sections go inactive (dimmed, no
+        // selection). `ToolCategory::ALL` is flashing, logging, framework, so the
+        // row order matches the on-screen order.
+        if !self.uferris_on {
+            for cat in ToolCategory::ALL {
+                if !self.cat_live(cat) {
+                    continue;
                 }
-            }
-            for i in 0..ToolCategory::Logging.catalog().len() {
-                if self.choice_grey(ToolCategory::Logging, i).is_none() {
-                    rows.push(Row::Logging(i));
-                }
-            }
-            for i in 0..ToolCategory::Framework.catalog().len() {
-                if self.choice_grey(ToolCategory::Framework, i).is_none() {
-                    rows.push(Row::Framework(i));
+                for i in 0..cat.catalog().len() {
+                    if self.choice_grey(cat, i).is_none() {
+                        rows.push(cat_row(cat, i));
+                    }
                 }
             }
         }
@@ -461,18 +465,21 @@ impl App {
     /// (headless-only in v3), so those are always defaults here. The project name
     /// is the required `--name` passed in from the CLI (not a TUI field).
     fn raw_config(&self) -> RawConfig {
-        // Only forward the toolchain ids when the axis is live (esp-hal); on the
-        // std/non-ESP stacks the toolchain is not user-selectable, so resolution
-        // expects `None` there.
-        let (flashing, logging, framework) = if self.axis_live() {
-            (
-                Some(ToolCategory::Flashing.catalog()[self.flashing_idx].id.to_string()),
-                Some(ToolCategory::Logging.catalog()[self.logging_idx].id.to_string()),
-                Some(ToolCategory::Framework.catalog()[self.framework_idx].id.to_string()),
-            )
-        } else {
-            (None, None, None)
+        // Forward a toolchain id only for the categories that are a LIVE axis on
+        // this stack — `Config::resolve` hard-rejects a value on a non-live
+        // category ("--flashing does not apply to the 'embassy-rp' stack"). So this
+        // must stay per-category: on the non-ESP scaffold FRAMEWORK is forwarded
+        // (that is what makes `embassy` generatable from the TUI) while flashing and
+        // logging MUST resolve to `None`, or non-ESP generation breaks outright.
+        let forward = |cat: ToolCategory| -> Option<String> {
+            self.cat_live(cat)
+                .then(|| cat.catalog()[self.cat_idx(cat)].id.to_string())
         };
+        let (flashing, logging, framework) = (
+            forward(ToolCategory::Flashing),
+            forward(ToolCategory::Logging),
+            forward(ToolCategory::Framework),
+        );
         RawConfig {
             chip: self.variant().id.to_string(),
             stack: Some(self.current_stack().id.to_string()),
@@ -543,35 +550,167 @@ fn cycle(idx: usize, delta: isize, len: usize) -> usize {
 // Rendering (pure over (&App, &Theme) — exercised headlessly by the tests below).
 // ---------------------------------------------------------------------------
 
-/// Ferris (the Rust crab) — the Summary panel's centrepiece, painted in the accent
-/// salmon. A 40-column × 16-row block whose LEADING SPACES are significant (they
-/// sculpt the shell), so the whole block is centred as a unit with a uniform
-/// left-pad and never re-padded per line. It is drawn ONLY when the panel interior
-/// can hold it (≥ `FERRIS_W` wide AND ≥ `FERRIS_H` spare rows below the summary
-/// text — see `draw_summary`); on a narrow/short panel it is omitted entirely
-/// rather than wrapped or clipped.
-const FERRIS_ART: [&str; FERRIS_H] = [
-    "              #  ##  ##",
-    "            #################",
-    "        ########################",
-    "      ############################",
-    "      #############################",
-    "   ##################################",
-    "   ###################################",
-    "  #####################################",
-    " ################  ######  ############",
-    "############## #   ####    #############",
-    "########################################",
-    "########################################",
-    "  ############################## ######",
-    "   ####    ######### #########    ####",
-    "     ##    ######### #########    ##",
-    "             #####      ####",
+/// Ferris (the Rust crab) — the Summary panel's centrepiece, rendered as COLORED
+/// QUADRANT-block terminal art. This is "V4-B": a 36×11 grid produced from the
+/// official CC0 logo (rustacean.net, `flat-happy`) and embedded here VERBATIM. Unlike
+/// the earlier half-block art, every cell carries its OWN glyph — one of the quadrant
+/// blocks (U+2596..U+259F plus `▀▄▌▐█` and space), packing 2×2 subpixels per cell —
+/// so the renderer draws `FERRIS_GLYPH[r][c]` rather than a fixed `▀`/`▄`.
+/// Three parallel tables describe each cell:
+///   `FERRIS_GLYPH` the character to draw
+///   `FERRIS_FG`    the glyph ink   (`t` in the source data)
+///   `FERRIS_BG`    the cell behind (`b` in the source data)
+/// Colour codes: `.` transparent (the themed panel background shows through),
+/// `o` body orange, `d` dark-red shading, `k` black (eyes/smile), `w` white (glints).
+/// The block's LEADING blanks are significant, so it is centred as a unit with a
+/// uniform left-pad and never re-padded per line. Drawn ONLY when the panel interior
+/// can hold it (≥ `FERRIS_W` wide AND ≥ `FERRIS_H` spare rows below the summary text —
+/// see `draw_summary`); on a narrow/short panel it is omitted entirely rather than
+/// wrapped or clipped.
+const FERRIS_W: usize = 36;
+const FERRIS_H: usize = 11;
+
+/// Per-cell glyphs, embedded verbatim from the V4-B data.
+const FERRIS_GLYPH: [&str; FERRIS_H] = [
+    "            ▀▖▘█▀██▀█▝▗▀            ",
+    "          ▝▀████████████▀▘          ",
+    "▘▖▌█▀   ▝▀████████████████▀▘   ▀█▐▗▝",
+    "██▘██▐▗▘████████████████████▝▖▌██▝██",
+    "▌████▘▘██████████████████████▝▝████▐",
+    " ▝▖█▝▖█████████▀▖▖██▀▖▖███████▗▘█▗▘ ",
+    "    ▖██████████▄▘███▄▘█████████▗    ",
+    "   ▌█▗▀▀▀██████▝▄▘██▝▄▘████▀▀▀▖█▐   ",
+    "   ▝█▝▄▖▄▄▄▝▀▀▀▀▀▝▀▚▀▀▀▀▘▄▄▄▗▄▘█▘   ",
+    "    ▝█▖▖                    ▗▗█▘    ",
+    "      ▖                      ▗      ",
 ];
 
-/// The crab's design bounding box: 40 columns wide, 16 rows tall.
-const FERRIS_W: usize = 40;
-const FERRIS_H: usize = 16;
+/// Per-cell glyph-ink colour codes, embedded verbatim from the V4-B data.
+const FERRIS_FG: [&str; FERRIS_H] = [
+    ".............o.o.oo.o.o.............",
+    "............oooooooooooo............",
+    ".o.o......oooooooooooooooo......o.o.",
+    "oo.oo.o.oooooooooooooooooooo.o.oo.oo",
+    ".ooooo.oooooooooooooooooooooo.ooooo.",
+    ".o.o..oooooooooowkooowkooooooo..o.o.",
+    ".....ooooooooookwkookwkoooooooo.....",
+    "....odoooooooookokookokooooooodo....",
+    "...oo..d..oooooookodoooooo..d..oo...",
+    "....ooo......................ooo....",
+    "....................................",
+];
+
+/// Per-cell background colour codes, embedded verbatim from the V4-B data.
+const FERRIS_BG: [&str; FERRIS_H] = [
+    "............o.o.o..o.o.o............",
+    "..........oo............oo..........",
+    "o.o.o...oo................oo...o.o.o",
+    "..o..o.o....................o.o..o..",
+    "o.....o......................o.....o",
+    "..o.oo.........wko..wko.......oo.o..",
+    "....o..........wk...wk.........o....",
+    "...o.oddd......oko..oko....dddo.o...",
+    ".....od.ddddddddddkkdddddddd.do.....",
+    ".......o....................o.......",
+    "......o......................o......",
+];
+
+/// The crab's four inks — FIXED truecolor in BOTH themes. Unlike every other widget
+/// they do NOT follow `theme.accent` (salmon in dark, blue in light); pinning them
+/// keeps the mascot's identity stable across a `t` theme toggle. Only the empty
+/// space around/inside the crab (transparent cells) tracks the theme.
+const FERRIS_ORANGE: Color = Color::Rgb(247, 76, 0);
+const FERRIS_DARK: Color = Color::Rgb(163, 40, 0);
+const FERRIS_BLACK: Color = Color::Rgb(0, 0, 0);
+const FERRIS_WHITE: Color = Color::Rgb(255, 255, 255);
+
+/// Ink for a colour code, or `None` for transparent (`.`).
+fn ferris_ink(code: u8) -> Option<Color> {
+    match code {
+        b'o' => Some(FERRIS_ORANGE),
+        b'd' => Some(FERRIS_DARK),
+        b'k' => Some(FERRIS_BLACK),
+        b'w' => Some(FERRIS_WHITE),
+        _ => None,
+    }
+}
+
+/// The quadrant-block glyph covering exactly the subpixels `g` does NOT cover.
+/// Used to express a cell whose GLYPH INK is transparent but whose BACKGROUND is
+/// coloured: painting `complement(g)` in that colour leaves the glyph's own
+/// subpixels untouched, which is visually identical to an unset background but keeps
+/// the crab theme-independent (an unset foreground would inherit `theme.fg` and paint
+/// a stray themed smudge). Space and `█` are each other's complement.
+fn ferris_complement(g: char) -> char {
+    match g {
+        ' ' => '█',
+        '█' => ' ',
+        '▀' => '▄',
+        '▄' => '▀',
+        '▌' => '▐',
+        '▐' => '▌',
+        '▘' => '▟',
+        '▟' => '▘',
+        '▝' => '▙',
+        '▙' => '▝',
+        '▖' => '▜',
+        '▜' => '▖',
+        '▗' => '▛',
+        '▛' => '▗',
+        '▚' => '▞',
+        '▞' => '▚',
+        other => other,
+    }
+}
+
+/// One cell's glyph + style. The cell's own glyph is drawn with `fg` = its ink and
+/// `bg` = its background; a transparent background is left UNSET so the themed panel
+/// shows through. A transparent ink over a coloured background is drawn as the
+/// complement glyph in that colour (see `ferris_complement`), and a fully transparent
+/// cell is a plain space with no background at all.
+fn ferris_cell(glyph: char, ink: Option<Color>, back: Option<Color>) -> (char, Style) {
+    match (ink, back) {
+        (None, None) => (' ', Style::default()),
+        (Some(f), Some(b)) => (glyph, Style::default().fg(f).bg(b)),
+        (Some(f), None) => (glyph, Style::default().fg(f)),
+        (None, Some(b)) => (ferris_complement(glyph), Style::default().fg(b)),
+    }
+}
+
+/// The crab as `FERRIS_H` styled `Line`s, each prefixed with `left_pad` spaces so the
+/// block is centred as a unit. Consecutive cells that share a style are merged into a
+/// single span so a row is a handful of spans rather than 36.
+fn ferris_lines(left_pad: usize) -> Vec<Line<'static>> {
+    let pad = " ".repeat(left_pad);
+    let mut out = Vec::with_capacity(FERRIS_H);
+    for r in 0..FERRIS_H {
+        let ink = FERRIS_FG[r].as_bytes();
+        let back = FERRIS_BG[r].as_bytes();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if !pad.is_empty() {
+            spans.push(Span::raw(pad.clone()));
+        }
+        let mut run = String::new();
+        let mut run_style: Option<Style> = None;
+        for (c, g) in FERRIS_GLYPH[r].chars().enumerate() {
+            let (glyph, style) = ferris_cell(g, ferris_ink(ink[c]), ferris_ink(back[c]));
+            if run_style == Some(style) {
+                run.push(glyph);
+            } else {
+                if let Some(s) = run_style.take() {
+                    spans.push(Span::styled(std::mem::take(&mut run), s));
+                }
+                run.push(glyph);
+                run_style = Some(style);
+            }
+        }
+        if let Some(s) = run_style {
+            spans.push(Span::styled(run, s));
+        }
+        out.push(Line::from(spans));
+    }
+    out
+}
 
 /// Exact rendered height (rows) of `lines` laid out at `width` with the same
 /// word-wrap the Summary panel uses. Rendered headlessly into a scratch buffer so
@@ -676,7 +815,7 @@ fn heading(theme: &Theme, text: &str) -> Line<'static> {
     )
 }
 
-/// The section heading for a toolchain category, with the whole-section disable
+/// The section heading for a toolchain category, with that category's disable
 /// reason (if any) shown dim beside it.
 fn section_heading(theme: &Theme, cat: ToolCategory, reason: Option<&str>) -> Line<'static> {
     let mut spans = vec![Span::styled(
@@ -836,13 +975,16 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 
     // ---- FLASHING TOOL / LOGGING / FRAMEWORK — full catalogs ----
-    let section_reason = model::section_grey_reason(s);
-    let live = section_reason.is_none();
-    // With µFerris ON (only possible on the live esp-hal axis) the BSP supplies its
+    // Greying is PER-CATEGORY, not per-stack: the non-ESP scaffold keeps FRAMEWORK
+    // live (embassy really is generatable on the embassy HALs) while flashing and
+    // logging stay display-only, so each section asks its own question.
+    // With µFerris ON (only possible on the esp-hal axis) the BSP supplies its
     // own toolchain, so these three sections go INACTIVE: dim heading, no reason
     // text, every radio an empty dim `( )`, none focusable.
     let uferris_suppress = app.uferris_on;
     for cat in ToolCategory::ALL {
+        let section_reason = model::category_grey_reason(s, cat);
+        let live = section_reason.is_none();
         lines.push(Line::from(""));
         if uferris_suppress {
             lines.push(Line::styled(
@@ -1017,28 +1159,24 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     }
 
-    // Ferris, the crab — the Summary panel's centrepiece. Painted in the accent
-    // salmon, centred horizontally as a 40-wide block (uniform left-pad, so the
-    // shape never breaks) and centred vertically in the leftover rows BELOW the
-    // summary content. Drawn only when it actually fits: interior width ≥ FERRIS_W
-    // AND ≥ FERRIS_H spare rows under the text. Otherwise omitted entirely — a
-    // narrow/short panel degrades to "no crab", never a wrapped or clipped shell.
+    // Ferris, the crab — the Summary panel's centrepiece. Rendered as COLORED half-
+    // block art in fixed (theme-independent) inks, centred horizontally as a
+    // FERRIS_W-wide block (uniform left-pad, so the shape never breaks) and centred
+    // vertically in the leftover rows BELOW the summary content. Drawn only when it
+    // actually fits: interior width ≥ FERRIS_W AND ≥ FERRIS_H spare rows under the
+    // text. Otherwise omitted entirely — a narrow/short panel degrades to "no crab",
+    // never a wrapped or clipped shell.
     let interior_w = area.width.saturating_sub(2);
     let interior_h = area.height.saturating_sub(2);
     let content_h = wrapped_height(&lines, interior_w);
     let leftover = interior_h.saturating_sub(content_h) as usize;
     if interior_w as usize >= FERRIS_W && leftover >= FERRIS_H {
-        let left_pad = " ".repeat((interior_w as usize - FERRIS_W) / 2);
+        let left_pad = (interior_w as usize - FERRIS_W) / 2;
         let top_pad = (leftover - FERRIS_H) / 2;
         for _ in 0..top_pad {
             lines.push(Line::from(""));
         }
-        for art in FERRIS_ART {
-            lines.push(Line::styled(
-                format!("{left_pad}{art}"),
-                Style::default().fg(theme.accent),
-            ));
-        }
+        lines.extend(ferris_lines(left_pad));
     }
 
     let p = Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme.base()).block(
@@ -1123,6 +1261,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| draw(f, app)).unwrap();
         buffer_to_string(terminal.backend().buffer())
+    }
+
+    /// Like `render`, but hands back the raw buffer so tests can inspect per-cell
+    /// colour (which the flattened string dump cannot show).
+    fn render_buf(app: &App, w: u16, h: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        terminal.backend().buffer().clone()
     }
 
     /// Interior (inside-the-borders) width/height of the Summary panel for a page
@@ -1255,16 +1401,161 @@ mod tests {
         assert!(!s.contains("not on the esp-idf/std stack"), "no per-option µFerris reason:\n{s}");
     }
 
+    /// M4: non-ESP generates for real, so the three sections are no longer greyed
+    /// as a block. FLASHING + LOGGING stay display-only (the scaffold ships no
+    /// runner and no logging frontend), FRAMEWORK is a live axis, and the whole
+    /// selection resolves to a generatable `Config` — not a gate.
     #[test]
-    fn non_esp_greys_sections_until_m4_with_rtic_visible_and_gates() {
-        let s = render(&app_on("xiao-rp2040", 0), W, H);
-        // "non-ESP" is signalled by the section-level header reason (not a
-        // per-option µFerris reason, which is no longer shown).
-        assert!(s.contains("until M4 (non-ESP backend)"), "sections greyed until M4:\n{s}");
-        // RTIC is a supported (display-only) entry on the ARM part → visible, not (-).
-        assert!(s.contains("RTIC"), "RTIC visible on the ARM part:\n{s}");
-        assert!(s.contains("NOT YET GENERATABLE"), "non-ESP is gated:\n{s}");
-        assert!(s.contains("M4"), "gate should mention M4:\n{s}");
+    fn non_esp_greys_flashing_and_logging_but_keeps_framework_live() {
+        let app = app_on("xiao-rp2040", 0); // rp2040-hal — the blocking HAL
+        let s = render(&app, W, H);
+
+        // The pre-M4 world is gone: no "until M4" banner, no gate in the summary.
+        assert!(!s.contains("until M4"), "non-ESP is no longer gated until M4:\n{s}");
+        assert!(!s.contains("NOT YET GENERATABLE"), "non-ESP generates for real now:\n{s}");
+        assert!(s.contains("READY"), "non-ESP selection is ready to generate:\n{s}");
+
+        // Flashing + logging carry the per-category reason at their headers…
+        let reason = "chosen by your own tooling, not baked into the project";
+        assert_eq!(
+            s.matches(reason).count(),
+            2,
+            "exactly the flashing + logging headers carry the non-ESP reason:\n{s}"
+        );
+        // …and FRAMEWORK does NOT (it is live, so its header is bare).
+        let framework_hdr = s.lines().find(|l| l.contains("FRAMEWORK")).unwrap();
+        assert!(!framework_hdr.contains(reason), "FRAMEWORK header must be bare: {framework_hdr}");
+
+        // RTIC is a real catalog entry on the ARM part: visible, but greyed —
+        // there is no verified RTIC body, which `choice_grey_reason` reports.
+        assert!(s.contains("(-) RTIC"), "RTIC visible but greyed on the ARM part:\n{s}");
+        assert!(
+            app.choice_grey(ToolCategory::Framework, cat_pos(ToolCategory::Framework, "rtic"))
+                .is_some(),
+            "RTIC must carry a grey reason"
+        );
+        // On this blocking HAL `embassy` is a declared gap too.
+        assert!(s.contains("(-) embassy"), "embassy greyed on the blocking HAL:\n{s}");
+
+        // Only the FRAMEWORK section contributes focusable rows.
+        let rows = app.focusable_rows();
+        assert!(
+            rows.iter().any(|r| matches!(r, Row::Framework(_))),
+            "FRAMEWORK is focusable on non-ESP: {rows:?}"
+        );
+        for r in &rows {
+            assert!(
+                !matches!(r, Row::Flashing(_) | Row::Logging(_)),
+                "flashing/logging must not be focusable on non-ESP: {rows:?}"
+            );
+        }
+    }
+
+    /// The guard the M4 implementer called out: `Config::resolve` REJECTS a
+    /// flashing/logging value on a stack where that category is not live, so the
+    /// TUI must keep passing `None` for those two on non-ESP even now that it
+    /// forwards FRAMEWORK. Verified by actually resolving, not by inspection.
+    #[test]
+    fn non_esp_raw_config_omits_flashing_and_logging_but_forwards_framework() {
+        for stack_idx in [0, 1] {
+            let app = app_on("xiao-rp2040", stack_idx);
+            let raw = app.raw_config();
+            assert!(raw.flashing.is_none(), "flashing must stay None on non-ESP (stack {stack_idx})");
+            assert!(raw.logging.is_none(), "logging must stay None on non-ESP (stack {stack_idx})");
+            assert!(
+                raw.framework.is_some(),
+                "framework IS forwarded on non-ESP (stack {stack_idx})"
+            );
+
+            // …and the resolve actually succeeds (this is what would break if a
+            // flashing/logging id leaked through).
+            let (cfg, readiness) = app
+                .resolved()
+                .unwrap_or_else(|e| panic!("non-ESP stack {stack_idx} must resolve, got: {e}"));
+            assert!(
+                matches!(readiness, Readiness::Ready),
+                "non-ESP is generatable since M4 (stack {stack_idx})"
+            );
+            assert_eq!(cfg.variant.id, "xiao-rp2040");
+        }
+    }
+
+    /// `embassy` is selectable and generatable on an embassy HAL, and refused on a
+    /// blocking one (no time driver) — the two halves of the M4 framework gap.
+    #[test]
+    fn embassy_is_selectable_on_an_embassy_hal_and_refused_on_a_blocking_one() {
+        let embassy_pos = cat_pos(ToolCategory::Framework, "embassy");
+
+        // (a) embassy-rp — live choice, resolves with framework = embassy.
+        let mut ok = app_on("xiao-rp2040", 1);
+        assert!(ok.choice_grey(ToolCategory::Framework, embassy_pos).is_none(), "embassy live");
+        ok.focus = Row::Framework(embassy_pos);
+        ok.activate();
+        assert_eq!(ok.framework_idx, embassy_pos, "embassy selected on the embassy HAL");
+        let (cfg, readiness) = ok.resolved().expect("embassy on embassy-rp must resolve");
+        assert_eq!(cfg.framework.id, "embassy");
+        assert!(matches!(readiness, Readiness::Ready));
+        let s = render(&ok, W, H);
+        assert!(s.contains("(•) embassy"), "embassy shows selected:\n{s}");
+        assert!(flat(&s).contains("--framework embassy"), "command carries the framework:\n{s}");
+
+        // (b) rp2040-hal — greyed, and `activate` refuses to move the selection.
+        let mut blocked = app_on("xiao-rp2040", 0);
+        let before = blocked.framework_idx;
+        assert!(
+            blocked.choice_grey(ToolCategory::Framework, embassy_pos).is_some(),
+            "embassy greyed on the blocking HAL"
+        );
+        blocked.focus = Row::Framework(embassy_pos);
+        blocked.activate();
+        assert_eq!(blocked.framework_idx, before, "greyed embassy must not become selected");
+
+        // Even if forced past the UI, the shared model refuses it outright.
+        blocked.framework_idx = embassy_pos;
+        let err = blocked.resolved().expect_err("embassy on a blocking HAL must be refused");
+        assert!(err.contains("embassy"), "refusal names the framework: {err}");
+    }
+
+    /// ESP behaviour is untouched by the per-category switch: esp-hal keeps all
+    /// three sections live, esp-idf keeps all three greyed.
+    #[test]
+    fn esp_section_liveness_is_unchanged_by_per_category_greying() {
+        let esp_hal = app_on("xiao-esp32c6", 0);
+        for cat in ToolCategory::ALL {
+            assert!(esp_hal.cat_live(cat), "esp-hal: {cat:?} stays live");
+        }
+        let raw = esp_hal.raw_config();
+        assert!(
+            raw.flashing.is_some() && raw.logging.is_some() && raw.framework.is_some(),
+            "esp-hal forwards all three selections"
+        );
+        let rows = esp_hal.focusable_rows();
+        assert!(rows.iter().any(|r| matches!(r, Row::Flashing(_))), "esp-hal flashing focusable");
+        assert!(rows.iter().any(|r| matches!(r, Row::Logging(_))), "esp-hal logging focusable");
+        assert!(rows.iter().any(|r| matches!(r, Row::Framework(_))), "esp-hal framework focusable");
+
+        let esp_idf = app_on("xiao-esp32s3", 1);
+        for cat in ToolCategory::ALL {
+            assert!(!esp_idf.cat_live(cat), "esp-idf: {cat:?} stays greyed");
+        }
+        let raw = esp_idf.raw_config();
+        assert!(
+            raw.flashing.is_none() && raw.logging.is_none() && raw.framework.is_none(),
+            "esp-idf forwards nothing — the template fixes the toolchain"
+        );
+        let rows = esp_idf.focusable_rows();
+        for r in &rows {
+            assert!(
+                !matches!(r, Row::Flashing(_) | Row::Logging(_) | Row::Framework(_)),
+                "no toolchain row is focusable on esp-idf: {rows:?}"
+            );
+        }
+        let s = render(&esp_idf, W, H);
+        assert_eq!(
+            s.matches("configured by the esp-idf template").count(),
+            3,
+            "all three esp-idf headers carry the reason:\n{s}"
+        );
     }
 
     #[test]
@@ -1349,51 +1640,163 @@ mod tests {
         assert!(!off.contains("(•) probe-rs"), "earlier probe-rs pick cleared, default restored:\n{off}");
     }
 
-    /// The crab's two full-width (40-`#`) rows are its distinctive, unambiguous
-    /// signature — they never occur in the form panel — so tests key off them.
-    const FERRIS_FULL_ROW: &str = "########################################";
+    /// The block glyphs the colored crab is painted with: the quadrant blocks
+    /// (U+2596..U+259F) plus `▀▄▌▐█`. None of them occur anywhere in the form/summary
+    /// text or panel borders, so any cell carrying one is unambiguously part of the
+    /// crab. A blank crab cell paints a plain space and is (correctly) not counted.
+    fn is_crab_glyph(sym: &str) -> bool {
+        matches!(
+            sym,
+            "▀" | "▄" | "▌" | "▐" | "█" | "▖" | "▗" | "▘" | "▙" | "▚" | "▛" | "▜" | "▝" | "▞" | "▟"
+        )
+    }
+
+    /// Every painted crab cell in a rendered buffer, as (x, y, glyph, fg).
+    fn crab_cells(buf: &Buffer) -> Vec<(u16, u16, String, Color)> {
+        let a = buf.area;
+        let mut v = Vec::new();
+        for y in 0..a.height {
+            for x in 0..a.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    if is_crab_glyph(cell.symbol()) {
+                        v.push((x, y, cell.symbol().to_string(), cell.fg));
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// Painted-column range [min, max] of the crab art within its FERRIS_W box,
+    /// derived from the embedded data so the centring test never hardcodes it.
+    fn art_col_bounds() -> (usize, usize) {
+        let mut lo = FERRIS_W;
+        let mut hi = 0usize;
+        for r in 0..FERRIS_H {
+            for grid in [FERRIS_FG[r], FERRIS_BG[r]] {
+                for (c, ch) in grid.bytes().enumerate() {
+                    if ch != b'.' {
+                        lo = lo.min(c);
+                        hi = hi.max(c);
+                    }
+                }
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Interior left column of the Summary panel (just inside its left border) —
+    /// replicates `draw`'s layout split so the crab's centring can be checked.
+    fn summary_ix(w: u16, h: u16) -> u16 {
+        let area = Rect::new(0, 0, w, h);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(3)])
+            .split(area);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(chunks[1]);
+        cols[1].x + 1
+    }
 
     #[test]
     fn summary_shows_ferris_art_centered() {
-        // At the tested size the panel is wide+tall enough: the crab is drawn,
-        // horizontally centred as a 40-wide block with a uniform left-pad.
-        let s = render(&app_on("xiao-esp32c6", 0), W, H);
-        assert!(s.contains(FERRIS_FULL_ROW), "the crab's full-width rows must appear:\n{s}");
+        // At the tested size the panel is wide+tall enough: the colored crab is
+        // painted, horizontally centred as a FERRIS_W-wide block.
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
+        let cells = crab_cells(&buf);
+        assert!(cells.len() > 200, "the colored crab must be painted (got {} cells)", cells.len());
 
+        // The crab is centred as one FERRIS_W-wide block at a uniform left-pad. Its
+        // painted columns must therefore land at exactly interior_left + left_pad +
+        // (the art's own painted-column offsets) — proving the block is centred, not
+        // left-jammed or off by one.
         let (iw, _ih) = summary_interior(W, H);
+        let ix = summary_ix(W, H) as usize;
         let left_pad = (iw as usize - FERRIS_W) / 2;
-        // The full-width row lands after EXACTLY `left_pad` spaces (the byte before
-        // that run is the panel's `│` border, so `left_pad+1` spaces cannot match) —
-        // i.e. the block is centred, not off-by-one or left-jammed.
-        let centered = format!("{}{}", " ".repeat(left_pad), FERRIS_FULL_ROW);
-        let over = format!("{}{}", " ".repeat(left_pad + 1), FERRIS_FULL_ROW);
-        assert!(s.contains(&centered), "crab must sit at left-pad {left_pad}:\n{s}");
-        assert!(!s.contains(&over), "crab must not be over-padded (off-centre):\n{s}");
+        let (art_lo, art_hi) = art_col_bounds();
+        let cmin = cells.iter().map(|c| c.0).min().unwrap() as usize;
+        let cmax = cells.iter().map(|c| c.0).max().unwrap() as usize;
+        assert_eq!(cmin, ix + left_pad + art_lo, "crab painted left edge must be centred");
+        assert_eq!(cmax, ix + left_pad + art_hi, "crab painted right edge must be centred");
+        // And the block's own margins inside the interior are symmetric.
+        let left_gap = cmin - ix;
+        let right_gap = (ix + iw as usize - 1) - cmax;
+        assert!(
+            (left_gap as i32 - right_gap as i32).abs() <= 1,
+            "crab must be horizontally centred (L={left_gap} R={right_gap})"
+        );
 
         // Shown in every summary state — including the gated / non-ESP page.
-        let g = render(&app_on("xiao-rp2040", 0), W, H);
-        assert!(g.contains(FERRIS_FULL_ROW), "crab shown even on the gated page:\n{g}");
+        let g = crab_cells(&render_buf(&app_on("xiao-rp2040", 0), W, H));
+        assert!(g.len() > 200, "crab shown even on the gated page (got {} cells)", g.len());
     }
+
+    /// Page width whose Summary interior is 35 — one column under `FERRIS_W` (36),
+    /// so it exercises the width guard right at its boundary.
+    const NARROW_W: u16 = 88;
 
     #[test]
     fn crab_omitted_when_panel_too_narrow() {
         // Interior width < FERRIS_W → no crab, but the panel still renders cleanly.
-        let (iw, _ih) = summary_interior(60, H);
+        let (iw, _ih) = summary_interior(NARROW_W, H);
         assert!((iw as usize) < FERRIS_W, "precondition: narrow panel (iw={iw})");
-        let s = render(&app_on("xiao-esp32c6", 0), 60, H);
-        assert!(s.contains("Summary"), "panel still renders when too narrow:\n{s}");
-        assert!(!s.contains(FERRIS_FULL_ROW), "no crab in a too-narrow panel:\n{s}");
+        assert_eq!(iw as usize, FERRIS_W - 1, "precondition: narrow by exactly one column");
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), NARROW_W, H);
+        assert!(render(&app_on("xiao-esp32c6", 0), NARROW_W, H).contains("Summary"),
+            "panel still renders when too narrow");
+        assert!(crab_cells(&buf).is_empty(), "no crab in a too-narrow panel");
+
+        // One column wider the guard opens again — proving it is the WIDTH that
+        // omitted the crab, not some unrelated layout accident.
+        let (iw2, _) = summary_interior(NARROW_W + 2, H);
+        assert!((iw2 as usize) >= FERRIS_W, "precondition: two columns wider fits (iw={iw2})");
+        let wider = render_buf(&app_on("xiao-esp32c6", 0), NARROW_W + 2, H);
+        assert!(!crab_cells(&wider).is_empty(), "crab returns once the panel is wide enough");
     }
+
+    /// Page height that leaves only 9 spare rows under the summary text — two short
+    /// of `FERRIS_H` (11), so it exercises the height guard near its boundary.
+    const SHORT_H: u16 = 32;
 
     #[test]
     fn crab_omitted_when_panel_too_short() {
         // Wide enough, but too few leftover rows below the summary text → no crab.
-        let (iw, _ih) = summary_interior(W, 24);
+        let (iw, _ih) = summary_interior(W, SHORT_H);
         assert!((iw as usize) >= FERRIS_W, "precondition: wide enough (iw={iw})");
-        let s = render(&app_on("xiao-esp32c6", 0), W, 24);
-        assert!(s.contains("Summary"), "panel still renders when too short:\n{s}");
-        assert!(!s.contains(FERRIS_FULL_ROW), "no crab when the panel is too short:\n{s}");
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, SHORT_H);
+        assert!(render(&app_on("xiao-esp32c6", 0), W, SHORT_H).contains("Summary"),
+            "panel still renders when too short");
+        assert!(crab_cells(&buf).is_empty(), "no crab when the panel is too short");
+
+        // It really is the HEIGHT that closed the guard, not the width or some other
+        // layout accident: the same width two rows taller clears the bar and the crab
+        // comes back — so SHORT_H sits just under the threshold.
+        let taller = render_buf(&app_on("xiao-esp32c6", 0), W, SHORT_H + 2);
+        assert!(!crab_cells(&taller).is_empty(), "crab returns once the panel is tall enough");
     }
+
+    #[test]
+    fn crab_color_is_pinned_across_themes() {
+        // The crab's inks are FIXED truecolor, identical in BOTH themes (they do NOT
+        // follow theme.accent). Compare the painted cells (position + glyph + fg)
+        // cell-for-cell between dark and light: they must match exactly.
+        let dark = crab_cells(&render_buf(
+            &{ let mut a = app_on("xiao-esp32c6", 0); a.dark = true; a }, W, H));
+        let light = crab_cells(&render_buf(
+            &{ let mut a = app_on("xiao-esp32c6", 0); a.dark = false; a }, W, H));
+        assert!(!dark.is_empty(), "crab must render");
+        assert_eq!(dark, light, "crab glyphs+fg must be identical across themes");
+
+        // The pinned body orange is present, and the light theme's (blue) accent is
+        // NOT used by any crab cell — proving the crab does not follow the theme.
+        let fgs: std::collections::HashSet<Color> = dark.iter().map(|c| c.3).collect();
+        assert!(fgs.contains(&FERRIS_ORANGE), "crab must paint its pinned body colour");
+        assert!(!fgs.contains(&Theme::light().accent), "crab must not use the theme accent");
+        assert_ne!(Theme::light().accent, FERRIS_ORANGE, "light accent should differ from the pin");
+    }
+
 
     /// Not run in the normal suite; run explicitly to dump verbatim snapshots:
     ///   cargo test --bin xiao-generate -- --ignored --nocapture print_form_snapshots
@@ -1423,13 +1826,57 @@ mod tests {
         // (d) esp-idf std stack — sections greyed.
         dump("(d) esp-idf std — xiao-esp32s3 / esp-idf, sections greyed", &app_on("xiao-esp32s3", 1));
 
-        // (e) non-ESP variant — sections greyed "until M4", RTIC visible, gated.
-        dump("(e) non-ESP — xiao-rp2040 / rp2040-hal, sections greyed until M4", &app_on("xiao-rp2040", 0));
+        // (e) non-ESP, blocking HAL — flashing/logging greyed, FRAMEWORK live but
+        // `embassy` greyed (no time driver on the blocking HAL), RTIC greyed.
+        dump(
+            "(e) non-ESP — xiao-rp2040 / rp2040-hal (flashing+logging greyed, FRAMEWORK live, embassy greyed)",
+            &app_on("xiao-rp2040", 0),
+        );
+
+        // (e2) non-ESP, embassy HAL — FRAMEWORK live with `embassy` selectable.
+        let mut e2 = app_on("xiao-rp2040", 1);
+        e2.focus = Row::Framework(cat_pos(ToolCategory::Framework, "embassy"));
+        e2.activate();
+        dump(
+            "(e2) non-ESP — xiao-rp2040 / embassy-rp with embassy selected (FRAMEWORK live)",
+            &e2,
+        );
 
         // (f) µFerris enabled — power/async live + the template note.
         let mut fsnap = app_on("xiao-esp32c3", 0);
         fsnap.uferris_on = true;
         fsnap.ensure_focus_valid();
         dump("(f) µFerris enabled — xiao-esp32c3 / esp-hal (power/async live + note)", &fsnap);
+    }
+
+    /// Not run in the normal suite; dumps every painted crab cell as
+    ///   x y <glyph> fr fg fb br bg bb
+    /// from the REAL rendered TUI buffer, so an external tool can redraw the crab
+    /// exactly as the terminal shows it (colored half-blocks on the dark panel bg):
+    ///   cargo test --bin xiao-generate -- --ignored --nocapture dump_ferris_cells
+    #[test]
+    #[ignore]
+    fn dump_ferris_cells() {
+        let rgb = |c: Color| -> (u8, u8, u8) {
+            match c {
+                Color::Rgb(r, g, b) => (r, g, b),
+                _ => (0, 0, 0),
+            }
+        };
+        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
+        let (br, bg, bb) = rgb(Theme::dark().bg);
+        println!("PANEL {br} {bg} {bb}");
+        let a = buf.area;
+        for y in 0..a.height {
+            for x in 0..a.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    if is_crab_glyph(cell.symbol()) {
+                        let (fr, fg, fb) = rgb(cell.fg);
+                        let (kr, kg, kb) = rgb(cell.bg);
+                        println!("{x} {y} {} {fr} {fg} {fb} {kr} {kg} {kb}", cell.symbol());
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,33 @@
+//! Blink the XIAO nRF52840's onboard user LED with the blocking `nrf52840-hal`.
+//!
+//! Source: the `Parts::new` / `into_push_pull_output` /
+//! `embedded_hal::digital::OutputPin` shape of nrf-rs/nrf-hal's
+//! `examples/blinky-button-demo` (that example targets an nRF52832 dev board and
+//! reads a button), retargeted to the XIAO's nRF52840 and its LED pin, with a
+//! `TIMER0` delay. Compile-verified: research/hal-framework-matrix.md cell 1.
+#![no_std]
+#![no_main]
+
+use embedded_hal::digital::OutputPin;
+use hal::gpio::Level;
+use nrf52840_hal as hal;
+use panic_halt as _;
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    let p = hal::pac::Peripherals::take().unwrap();
+    let port0 = hal::gpio::p0::Parts::new(p.P0);
+
+    // XIAO nRF52840 onboard user LED (common anode -> Level::High is off).
+    let mut led = port0.p0_{{LED_GPIO}}.into_push_pull_output(Level::{{LED_INIT_LEVEL}});
+
+    // TIMER0 runs at 1 MHz by default -> 500_000 ticks = 500 ms.
+    let mut timer = hal::Timer::new(p.TIMER0);
+
+    loop {
+        led.set_low().unwrap();
+        timer.delay(500_000);
+        led.set_high().unwrap();
+        timer.delay(500_000);
+    }
+}

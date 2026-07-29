@@ -1,1 +1,9 @@
 /target
+
+# NOTE: running the tool from the repo root drops a generated project here (e.g.
+# `cargo run -- --name blinky` creates ./blinky). Those carry their own
+# Cargo.toml + .cargo/config.toml pinning a bare-metal target, which
+# rust-analyzer auto-discovers and then fails to analyse:
+#   "can't find crate for `test`"  (no_std targets have no test crate)
+# Generate outside the repo instead:
+#   cargo run -- --chip xiao-rp2040 --name demo --out /tmp/demo

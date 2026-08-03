@@ -209,6 +209,10 @@ struct App {
     focus: Row,
     /// `true` = dark theme (default), `false` = light. Toggled with `t`.
     dark: bool,
+    /// Installed host-tool prereq ids, probed ONCE when the TUI launches. `None`
+    /// in tests (which never spawn probes); the Summary's "Host tools" note is
+    /// shown only when this is `Some`.
+    installed: Option<std::collections::HashSet<&'static str>>,
     /// Set when the session finishes; consumed by `launch`.
     outcome: Option<Outcome>,
 }
@@ -242,6 +246,7 @@ impl App {
             name,
             focus: Row::Device,
             dark: true,
+            installed: None,
             outcome: None,
         };
         app.reset_cats();
@@ -1083,6 +1088,35 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     lines.push(Line::styled(msg, Style::default().fg(theme.warn)));
                 }
             }
+
+            // Host-tools note: what THIS configuration needs installed, checked
+            // against the probe run once at launch. Updates live as the flashing
+            // tool / stack change what is required. Shown only in the real TUI
+            // (tests leave `installed` = None so they never spawn probes).
+            if let Some(installed) = &app.installed {
+                let missing: Vec<&'static registry::Prereq> = model::prerequisites(&cfg)
+                    .into_iter()
+                    .filter(|p| !installed.contains(p.id))
+                    .collect();
+                lines.push(Line::from(""));
+                if missing.is_empty() {
+                    lines.push(Line::styled(
+                        "Host tools: all installed ✔",
+                        Style::default().fg(theme.ok),
+                    ));
+                } else {
+                    let names =
+                        missing.iter().map(|p| p.display).collect::<Vec<_>>().join(", ");
+                    lines.push(Line::styled(
+                        format!("Host tools missing ✗: {names}"),
+                        Style::default().fg(theme.warn),
+                    ));
+                    lines.push(Line::styled(
+                        "run `--check` for the install commands",
+                        Style::default().fg(theme.dim),
+                    ));
+                }
+            }
         }
         Err(e) => {
             lines.push(Line::styled(
@@ -1157,6 +1191,19 @@ pub fn launch(name: String) -> Result<Outcome> {
 
 fn run_loop(terminal: &mut DefaultTerminal, name: String) -> Result<Outcome> {
     let mut app = App::new(name);
+
+    // Probe host tools ONCE, up front, so the Summary can report what is installed
+    // without re-spawning a process on every redraw. Installed ids only; the
+    // config-specific subset is looked up against this per draw.
+    let mut host = crate::prereq::Host::new();
+    app.installed = Some(
+        registry::PREREQS
+            .iter()
+            .filter(|p| !host.detect(p).is_missing())
+            .map(|p| p.id)
+            .collect(),
+    );
+
     loop {
         terminal.draw(|f| draw(f, &app))?;
         if let Event::Key(key) = event::read()? {
@@ -1931,6 +1978,33 @@ mod tests {
         let l = crab_cells(&render_buf(&light, W, H));
         assert!(!d.is_empty(), "dark mode must paint a crab");
         assert!(l.is_empty(), "light mode must paint NO crab, got {} cells", l.len());
+    }
+
+    /// The Summary shows a live "Host tools" note reflecting what the current
+    /// configuration needs against the launch-time probe — both branches. The
+    /// note is suppressed entirely until `installed` is populated (so tests and
+    /// the snapshot dumps never spawn probes).
+    #[test]
+    fn summary_reports_host_tool_availability() {
+        // Suppressed before the probe runs.
+        let app = app_on("xiao-rp2040", 0);
+        assert!(!render(&app, W, H).contains("Host tools"), "no note before probing");
+
+        // Everything installed → the all-present note.
+        let mut all = app_on("xiao-rp2040", 0);
+        all.installed = Some(registry::PREREQS.iter().map(|p| p.id).collect());
+        assert!(
+            render(&all, W, H).contains("Host tools: all installed"),
+            "all-present note missing"
+        );
+
+        // Nothing installed → the missing note names the tool and points at --check.
+        let mut none = app_on("xiao-rp2040", 0);
+        none.installed = Some(std::collections::HashSet::new());
+        let s = render(&none, W, H);
+        assert!(s.contains("Host tools missing"), "missing note:\n{s}");
+        assert!(s.contains("picotool"), "missing note names the flash tool:\n{s}");
+        assert!(s.contains("--check"), "missing note points at --check:\n{s}");
     }
 
     /// Not run in the normal suite; dumps the crab's silhouette and the fitted

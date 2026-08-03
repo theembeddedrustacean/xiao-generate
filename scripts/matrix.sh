@@ -683,7 +683,13 @@ flash_nrf() { # id chip elf  (Adafruit nRF52 UF2 bootloader, double-tap RESET)
   pause_for "Double-tap the RESET button on the $chip (two taps within ~500 ms).
   A volume named '$vol' must appear in Finder."
   wait_for_volume "$vol" || { FLASH_MSG="/Volumes/$vol never appeared -- board did not enter the UF2 bootloader"; return 1; }
-  cp "$uf2" "/Volumes/$vol/" || { FLASH_MSG="copying the UF2 to /Volumes/$vol failed"; return 1; }
+  # `cp -X` skips extended attributes: a plain `cp` to the FAT bootloader volume
+  # fails its xattr step on macOS and would false-FAIL an otherwise good write.
+  # The board also reboots the instant the last UF2 block lands, so cp can lose
+  # the volume mid-copy -- either way cp's exit status is unreliable here. The
+  # authoritative, probe-free success signal is the volume UNMOUNTING (checked
+  # below), so a copy error is deliberately not fatal on its own.
+  cp -X "$uf2" "/Volumes/$vol/" 2>/dev/null || true
   sync
   # The UF2 bootloader reboots into the app as soon as the write completes, so
   # the volume disappearing is the only success signal available without a probe.
@@ -727,7 +733,9 @@ flash_samd() { # id chip elf  (Seeed uf2-samdx1 bootloader, volume "Arduino")
   uf2conv.py "$bin" -c -b 0x2000 -f 0x68ed2b88 -o "$uf2" || { FLASH_MSG='uf2conv.py failed'; return 1; }
   pause_for "Short the two RST pads on the $chip twice quickly. A volume named '$vol' appears."
   wait_for_volume "$vol" || { FLASH_MSG="/Volumes/$vol never appeared"; return 1; }
-  cp "$uf2" "/Volumes/$vol/" || { FLASH_MSG="copying the UF2 to /Volumes/$vol failed"; return 1; }
+  # cp -X: skip extended attributes, which a plain cp cannot write to the FAT
+  # bootloader volume on macOS (it would report failure for an otherwise good write).
+  cp -X "$uf2" "/Volumes/$vol/" 2>/dev/null || true
   sync
   local i=0
   while [ $i -lt 15 ]; do [ -d "/Volumes/$vol" ] || break; sleep 1; i=$((i+1)); done

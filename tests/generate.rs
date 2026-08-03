@@ -635,11 +635,13 @@ fn summary_reports_prerequisites_and_the_markers_are_real() {
     assert!(s.contains("thumbv6m-none-eabi"), "must name the RP2040 target:\n{s}");
     assert!(s.contains("picotool"), "must name the RP2040 flash tool:\n{s}");
 
-    // The picotool line's marker must agree with an independent probe.
+    // The picotool PREREQUISITE line's marker must agree with an independent
+    // probe. (The summary also carries a `flashing: picotool` line now that
+    // FLASHING is a live axis on the non-ESP scaffold, so match the marker line.)
     let line = s
         .lines()
-        .find(|l| l.contains("picotool"))
-        .unwrap_or_else(|| panic!("no picotool line:\n{s}"));
+        .find(|l| l.contains("picotool") && (l.contains('✔') || l.contains('✗')))
+        .unwrap_or_else(|| panic!("no picotool prerequisite line:\n{s}"));
     if tool_on_path(&["picotool", "version"]) {
         assert!(line.contains('✔'), "picotool is on PATH but reported missing: {line}");
         assert!(
@@ -921,6 +923,59 @@ fn non_esp_framework_axis_changes_the_generated_project() {
     assert!(main.contains("Timer::after_millis"), "embassy body:\n{main}");
 }
 
+/// `--logging defmt` wires the defmt logging stack into the non-ESP scaffold:
+/// the deps, the `-Tdefmt.x` link arg (in rustflags, or in build.rs for the
+/// embassy-rp/RP2040 stack), the global logger, and one `defmt::info!`. `--logging
+/// none` (the default) touches none of it.
+#[test]
+fn non_esp_defmt_logging_wires_the_scaffold() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A rustflags stack (rp2040-hal): defmt.x lands in .cargo/config.toml.
+    let out = tmp.path().join("rp-defmt");
+    let res = bin()
+        .args(["--chip", "xiao-rp2040", "--logging", "defmt", "-o", out.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(res.status.success());
+    let toml = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
+    assert!(toml.contains("defmt = "), "defmt dep present:\n{toml}");
+    assert!(toml.contains("defmt-rtt = "), "defmt-rtt dep present:\n{toml}");
+    let cfg = std::fs::read_to_string(out.join(".cargo/config.toml")).unwrap();
+    assert!(cfg.contains("-Tdefmt.x"), "defmt linker script in rustflags:\n{cfg}");
+    let main = std::fs::read_to_string(out.join("src/main.rs")).unwrap();
+    assert!(main.contains("use defmt_rtt as _;"), "global logger pulled in:\n{main}");
+    assert!(main.contains("defmt::info!"), "one real defmt log emitted:\n{main}");
+
+    // A build.rs-link-arg stack (embassy-rp on RP2040): defmt.x lands in build.rs,
+    // after link.x / link-rp.x — NOT in .cargo/config.toml (that stack has no
+    // rustflags block).
+    let erp = tmp.path().join("erp-defmt");
+    let res = bin()
+        .args([
+            "--chip", "xiao-rp2040", "--stack", "embassy-rp",
+            "--logging", "defmt", "-o", erp.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(res.status.success());
+    let build = std::fs::read_to_string(erp.join("build.rs")).unwrap();
+    assert!(build.contains("-Tdefmt.x"), "defmt linker script in build.rs:\n{build}");
+    let order = build.find("-Tlink.x").zip(build.find("-Tdefmt.x"));
+    let (link_pos, defmt_pos) = order.expect("both link scripts must be emitted");
+    assert!(link_pos < defmt_pos, "defmt.x must follow link.x:\n{build}");
+
+    // logging = none (the default) wires none of it — byte-for-byte the old body.
+    let none = tmp.path().join("rp-none");
+    generate_cell("xiao-rp2040", "rp2040-hal", "none", &none);
+    let toml = std::fs::read_to_string(none.join("Cargo.toml")).unwrap();
+    assert!(!toml.contains("defmt"), "no defmt without --logging defmt:\n{toml}");
+    let cfg = std::fs::read_to_string(none.join(".cargo/config.toml")).unwrap();
+    assert!(!cfg.contains("defmt.x"), "no defmt.x without --logging defmt:\n{cfg}");
+    let main = std::fs::read_to_string(none.join("src/main.rs")).unwrap();
+    assert!(!main.contains("defmt"), "no defmt in the body without --logging defmt:\n{main}");
+}
+
 #[test]
 fn non_esp_led_pin_is_substituted_from_the_registry() {
     let tmp = tempfile::tempdir().unwrap();
@@ -995,9 +1050,8 @@ fn non_esp_gated_combos_are_refused_before_generation() {
         (&["--chip", "xiao-samd21", "--framework", "rtic"], "RTIC"),
         // SAMD21 has no embassy stack at all -> a support-list rejection.
         (&["--chip", "xiao-samd21", "--framework", "embassy"], "not supported"),
-        // flashing/logging are not a live axis on the non-ESP scaffold.
-        (&["--chip", "xiao-rp2040", "--flashing", "probe-rs"], "--flashing"),
-        (&["--chip", "xiao-rp2040", "--logging", "defmt"], "--logging"),
+        // `log` is the ESP-only (esp-println) frontend — refused on Cortex-M.
+        (&["--chip", "xiao-rp2040", "--logging", "log"], "ESP-only"),
         // component templates stay gated in M4.
         (&["--chip", "xiao-rp2040", "--template", "rgb-led"], "compile-verified"),
         (&["--chip", "xiao-nrf52840-sense", "--template", "imu-read"], "not documented by Seeed"),
@@ -1070,6 +1124,68 @@ fn compile_gate_every_non_esp_cell_builds_a_real_image() {
             syms.lines().any(|l| l.ends_with(" __vector_table")),
             "{name}: no vector table — the linker script was not applied"
         );
+    }
+}
+
+/// The defmt half of the compile gate: every non-ESP cell must ALSO build with
+/// `--logging defmt`. This is the load-bearing proof that the defmt wiring (the
+/// deps, the `-Tdefmt.x` link arg, the injected global logger + `defmt::info!`)
+/// links on every non-ESP HAL — the whole non-ESP logging axis rests on it. Same
+/// opt-in gate as the base-image test; builds `--release`.
+#[test]
+#[ignore = "opt-in: set XIAO_COMPILE_GATE=1 (downloads and builds every HAL)"]
+fn compile_gate_every_non_esp_cell_builds_with_defmt() {
+    if !compile_gate_enabled() {
+        eprintln!("skipping: set XIAO_COMPILE_GATE=1 to run the compile gate");
+        return;
+    }
+    let nm = llvm_nm().expect("llvm-nm from the rustup sysroot");
+    let tmp = tempfile::tempdir().unwrap();
+    for (chip, stack, framework, target) in NON_ESP_CELLS {
+        if !target_installed(target) {
+            eprintln!("skipping {chip}/{stack}/{framework}: target {target} not installed");
+            continue;
+        }
+        let name = format!("{chip}-{stack}-{framework}-defmt");
+        let out = tmp.path().join(&name);
+        let mut args = vec!["--chip", *chip, "--stack", *stack, "--logging", "defmt"];
+        if *framework != "none" {
+            args.extend_from_slice(&["--framework", framework]);
+        }
+        generate(&args, &out);
+
+        // The wiring must be present in the generated project.
+        assert!(
+            std::fs::read_to_string(out.join("Cargo.toml")).unwrap().contains("defmt-rtt"),
+            "{name}: no defmt-rtt dep"
+        );
+        assert!(
+            std::fs::read_to_string(out.join("src/main.rs")).unwrap().contains("defmt::info!"),
+            "{name}: no defmt::info! in the body"
+        );
+
+        let build = Command::new("cargo")
+            .args(["build", "--release"])
+            .current_dir(&out)
+            .output()
+            .expect("cargo build --release");
+        assert!(
+            build.status.success(),
+            "{name} failed to build with defmt:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let elf = out.join("target").join(target).join("release").join(&name);
+        assert!(elf.exists(), "{name}: no ELF at {}", elf.display());
+        let syms = Command::new(&nm).arg(&elf).output().expect("llvm-nm");
+        let syms = String::from_utf8_lossy(&syms.stdout);
+        // Both linker scripts applied: link.x's vector table AND defmt.x's own
+        // linker-defined symbols (`_defmt_*`).
+        assert!(
+            syms.lines().any(|l| l.ends_with(" __vector_table")),
+            "{name}: no vector table — link.x was not applied"
+        );
+        assert!(syms.contains("_defmt_"), "{name}: no _defmt_* symbols — defmt.x was not applied");
     }
 }
 

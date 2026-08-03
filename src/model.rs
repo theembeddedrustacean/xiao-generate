@@ -41,34 +41,70 @@ pub fn option_groups_apply(cfg: &Config) -> bool {
         && registry::is_base_template(&cfg.template_id)
 }
 
-/// Whether one universal toolchain category is a *live* axis for a stack — i.e.
-/// changing it actually changes what gets generated. Derived purely from the
+/// Whether one universal toolchain category is a *live*, user-selectable axis for
+/// a stack — i.e. picking a value has a real effect. Derived purely from the
 /// backend (R4):
 ///  - **esp-hal**: all three (they become esp-generate `-o` flags).
 ///  - **esp-idf**: none (the template fixes the toolchain).
-///  - **non-ESP scaffold (M4)**: FRAMEWORK only. `none` emits the bare-metal
-///    body, `embassy` the executor body + the HAL's time driver. Flashing and
-///    logging are not wired for non-ESP yet — the generated project ships no
-///    runner and no logging frontend — so they stay display-only.
+///  - **non-ESP scaffold (M4)**: all three.
+///    - FRAMEWORK: `none` emits the bare-metal body, `embassy` the executor body
+///      + the HAL's time driver.
+///    - LOGGING: `defmt` wires the defmt global logger + `defmt::info!` into the
+///      scaffold (deps, the `-Tdefmt.x` link arg, the base body); `none` does not.
+///    - FLASHING: does not change the emitted code, but it is still a real choice —
+///      it selects the flash route reported in the prerequisites/summary (the
+///      no-probe USB/UF2 tool vs `probe-rs`).
 pub fn category_live(stack: &Stack, cat: ToolCategory) -> bool {
+    let _ = cat;
     match stack.backend {
         Backend::EspGenerate => true,
         Backend::CargoGenerate => false,
-        Backend::NonEspScaffold => matches!(cat, ToolCategory::Framework),
+        Backend::NonEspScaffold => true,
     }
 }
 
 /// The reason one universal toolchain category is not editable for a stack, or
-/// `None` when it is live. Counterpart of [`category_live`].
+/// `None` when it is live. Counterpart of [`category_live`]. Only esp-idf reaches
+/// the non-`None` case now — its whole toolchain is fixed by the template.
 pub fn category_grey_reason(stack: &Stack, cat: ToolCategory) -> Option<&'static str> {
     if category_live(stack, cat) {
         return None;
     }
     match stack.backend {
         Backend::CargoGenerate => Some("configured by the esp-idf template"),
-        Backend::NonEspScaffold => Some("chosen by your own tooling, not baked into the project"),
-        Backend::EspGenerate => None,
+        Backend::EspGenerate | Backend::NonEspScaffold => None,
     }
+}
+
+/// The note shown next to a flashing choice when it drives the board over an
+/// **external** SWD debug probe on this stack. Only `probe-rs` needs a probe, and
+/// only where the chip has no built-in debug interface — so it fires on the
+/// Cortex-M boards but NOT on ESP (built-in USB-Serial-JTAG). `None` for every
+/// no-probe route and on the ESP stacks. Surfaced beside the flasher in both the
+/// TUI flashing section and the generation summary.
+pub fn flashing_probe_note(stack: &Stack, choice: &ToolChoice) -> Option<&'static str> {
+    (choice.needs_probe && !stack.builtin_debug)
+        .then_some("requires an external SWD debug probe")
+}
+
+/// The note shown next to `--logging defmt` when its output can only be VIEWED
+/// with an external debug probe (RTT) — the Cortex-M boards with no built-in
+/// debug. defmt still compiles and links without a probe; this only flags how to
+/// read it. `None` on the ESP stacks (RTT over the built-in USB-Serial-JTAG) and
+/// for any non-defmt logging choice. Mirrors [`flashing_probe_note`].
+pub fn defmt_view_note(stack: &Stack, choice: &ToolChoice) -> Option<&'static str> {
+    (choice.id == "defmt" && !stack.builtin_debug)
+        .then_some("viewed over RTT — needs a debug probe attached")
+}
+
+/// Whether the flashing/logging/framework triple should be shown in the summary
+/// for this config. True on the esp-hal base project (all three are the live
+/// esp-generate axes) and on every non-ESP scaffold project (flashing selects the
+/// flash route, logging wires defmt, framework picks the body). False on esp-idf
+/// (template-owned) and on esp-hal component add-ons (locked to the template's
+/// own option set — those keep the existing framework-only summary line).
+pub fn summary_shows_toolchain(cfg: &Config) -> bool {
+    option_groups_apply(cfg) || matches!(cfg.stack.backend, Backend::NonEspScaffold)
 }
 
 /// The reason a specific catalog choice is unavailable for a `(variant, stack,
@@ -127,6 +163,12 @@ pub fn unsupported_reason(
     let esp = stack.backend.is_esp();
     match (cat, choice.id) {
         (ToolCategory::Framework, "rtic") if esp => "not supported on ESP".to_string(),
+        // `log` is the esp-println frontend; there is no generic `log` backend for
+        // the Cortex-M boards, so name it as ESP-only rather than a flat
+        // "not supported on <device>".
+        (ToolCategory::Logging, "log") if !esp => {
+            "log is an ESP-only logging frontend (esp-println); use defmt".to_string()
+        }
         _ => format!("not supported on {}", variant.display),
     }
 }
@@ -569,10 +611,10 @@ impl Config {
 ///  2. **the stack's own build tools** (`Stack::build_prereqs`) — e.g. esp-idf's
 ///     `ldproxy`/`python3`/`git`;
 ///  3. **the flash route**. On a stack where FLASHING is a live user choice
-///     (esp-hal) it follows the chosen [`registry::ToolChoice`], so `--flashing
-///     probe-rs` swaps espflash out for probe-rs. Everywhere else the route is
-///     fixed — by the board's bootloader (non-ESP USB/UF2) or by the template's
-///     cargo runner (esp-idf) — and comes from `Stack::flash_prereqs`.
+///     (esp-hal AND the non-ESP scaffolds) it follows the chosen
+///     [`registry::ToolChoice`], so `--flashing probe-rs` swaps the board's
+///     default no-probe route out for probe-rs. Only esp-idf fixes the route in
+///     `Stack::flash_prereqs` (its template's cargo runner is espflash).
 ///
 /// µFerris adds nothing: `uferris-bsp` is an ordinary cargo dependency on the
 /// esp-hal stack, so a µFerris project needs exactly what the same chip's plain
@@ -657,9 +699,12 @@ pub fn equivalent_command(cfg: &Config) -> String {
     }
 
     // Universal toolchain flags — only for categories that are a live axis on
-    // this stack (all three on the esp-hal base project; FRAMEWORK on the non-ESP
-    // scaffold), and only when a choice differs from the universal default (keep
-    // the command terse but faithful/runnable). No esp-generate `-o` ever appears.
+    // this stack (all three on the esp-hal base project AND the non-ESP scaffold),
+    // and only when a choice differs from the STACK's default (keep the command
+    // terse but faithful/runnable). The default to compare against is the stack's
+    // own — on non-ESP the flashing default is the board's no-probe route
+    // (picotool/uf2/hf2), not the universal espflash — so an unmodified selection
+    // never appears. No esp-generate `-o` ever appears.
     let esp_groups = option_groups_apply(cfg);
     for (cat, chosen) in [
         (ToolCategory::Flashing, cfg.flashing),
@@ -673,7 +718,12 @@ pub fn equivalent_command(cfg: &Config) -> String {
         } else {
             category_live(cfg.stack, cat)
         };
-        if live && chosen.id != cat.default_choice().id {
+        let default_id = cfg
+            .stack
+            .default_tool(cat)
+            .map(|c| c.id)
+            .unwrap_or_else(|| cat.default_choice().id);
+        if live && chosen.id != default_id {
             parts.push(format!("--{} {}", cat.flag(), chosen.id));
         }
     }
@@ -860,21 +910,72 @@ mod tests {
     }
 
     #[test]
-    fn flashing_and_logging_are_not_a_live_axis_on_non_esp() {
-        for (flag, val) in [("flashing", "probe-rs"), ("logging", "defmt")] {
-            let mut r = raw("xiao-rp2040");
-            match flag {
-                "flashing" => r.flashing = Some(val.to_string()),
-                _ => r.logging = Some(val.to_string()),
-            }
-            let e = Config::resolve(r).unwrap_err();
-            assert!(e.contains(&format!("--{flag}")), "got: {e}");
-        }
-        // …but the framework axis IS live there.
+    fn flashing_and_logging_are_a_live_axis_on_non_esp() {
+        // All three toolchain axes are live on the non-ESP scaffold now.
         let rp = registry::variant("xiao-rp2040").unwrap().default_stack();
+        assert!(category_live(rp, ToolCategory::Flashing));
+        assert!(category_live(rp, ToolCategory::Logging));
         assert!(category_live(rp, ToolCategory::Framework));
-        assert!(!category_live(rp, ToolCategory::Flashing));
-        assert!(!category_live(rp, ToolCategory::Logging));
+
+        // `--flashing probe-rs` is ACCEPTED on a Cortex-M board — the external-probe
+        // alternative to the default USB/UF2 route.
+        let mut r = raw("xiao-nrf52840");
+        r.flashing = Some("probe-rs".to_string());
+        assert_eq!(Config::resolve(r).unwrap().flashing.id, "probe-rs");
+
+        // The DEFAULT flashing route is the board's no-probe tool, never espflash.
+        assert_eq!(Config::resolve(raw("xiao-rp2040")).unwrap().flashing.id, "picotool");
+        assert_eq!(Config::resolve(raw("xiao-nrf52840")).unwrap().flashing.id, "uf2");
+        assert_eq!(Config::resolve(raw("xiao-samd21")).unwrap().flashing.id, "hf2");
+
+        // `--logging defmt` is accepted; `--logging log` is refused as ESP-only.
+        let mut r = raw("xiao-rp2040");
+        r.logging = Some("defmt".to_string());
+        assert_eq!(Config::resolve(r).unwrap().logging.id, "defmt");
+        let mut r = raw("xiao-rp2040");
+        r.logging = Some("log".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("--logging") && e.contains("log"), "got: {e}");
+        assert!(e.contains("ESP-only"), "the `log` refusal must name it ESP-only: {e}");
+        // …and the default logging is `none` (no defmt unless asked).
+        assert_eq!(Config::resolve(raw("xiao-rp2040")).unwrap().logging.id, "none");
+    }
+
+    #[test]
+    fn probe_and_defmt_notes_fire_only_off_esp() {
+        let rp = registry::variant("xiao-rp2040").unwrap().default_stack();
+        let esp = registry::variant("xiao-esp32c6").unwrap().stack("esp-hal").unwrap();
+        let probe_rs = registry::tool_choice(ToolCategory::Flashing, "probe-rs").unwrap();
+        let picotool = registry::tool_choice(ToolCategory::Flashing, "picotool").unwrap();
+        let defmt = registry::tool_choice(ToolCategory::Logging, "defmt").unwrap();
+        let none = registry::tool_choice(ToolCategory::Logging, "none").unwrap();
+
+        // Cortex-M: probe-rs needs an external probe; no-probe routes and non-defmt
+        // logging carry no note.
+        assert!(flashing_probe_note(rp, probe_rs).is_some());
+        assert!(flashing_probe_note(rp, picotool).is_none());
+        assert!(defmt_view_note(rp, defmt).is_some());
+        assert!(defmt_view_note(rp, none).is_none());
+        // ESP: built-in USB-Serial-JTAG, so even probe-rs / defmt need no external
+        // probe — no note.
+        assert!(flashing_probe_note(esp, probe_rs).is_none());
+        assert!(defmt_view_note(esp, defmt).is_none());
+    }
+
+    #[test]
+    fn non_esp_flashing_choice_drives_the_flash_prerequisite() {
+        // Default nRF route is the UF2 pipeline (rust-objcopy + uf2conv), no probe.
+        let default = prereq_ids("xiao-nrf52840", |_| {});
+        assert!(default.contains(&"rust-objcopy") && default.contains(&"uf2conv"), "{default:?}");
+        assert!(!default.contains(&"probe-rs"), "{default:?}");
+        // --flashing probe-rs swaps the whole route for the probe.
+        let probe = prereq_ids("xiao-nrf52840", |r| r.flashing = Some("probe-rs".into()));
+        assert!(probe.contains(&"probe-rs"), "{probe:?}");
+        assert!(!probe.contains(&"rust-objcopy") && !probe.contains(&"uf2conv"), "{probe:?}");
+        // RP default is picotool; probe-rs swaps it there too.
+        assert!(prereq_ids("xiao-rp2040", |_| {}).contains(&"picotool"));
+        let rp_probe = prereq_ids("xiao-rp2040", |r| r.flashing = Some("probe-rs".into()));
+        assert!(rp_probe.contains(&"probe-rs") && !rp_probe.contains(&"picotool"), "{rp_probe:?}");
     }
 
     #[test]
@@ -1108,6 +1209,30 @@ mod tests {
     }
 
     #[test]
+    fn parity_non_esp_flashing_and_logging_round_trip() {
+        // The stack default (picotool / none) is omitted — a bare non-ESP command
+        // stays terse even though flashing/logging are now live.
+        let c = cmd_for(|r| r.chip = "xiao-rp2040".to_string());
+        assert_eq!(c, "xiao-generate --chip xiao-rp2040");
+        // probe-rs (non-default flashing) and defmt (non-default logging) DO appear.
+        let c = cmd_for(|r| {
+            r.chip = "xiao-rp2040".to_string();
+            r.flashing = Some("probe-rs".to_string());
+            r.logging = Some("defmt".to_string());
+        });
+        assert_eq!(
+            c,
+            "xiao-generate --chip xiao-rp2040 --flashing probe-rs --logging defmt"
+        );
+        // Passing the stack default flashing explicitly still round-trips to terse.
+        let c = cmd_for(|r| {
+            r.chip = "xiao-nrf52840".to_string();
+            r.flashing = Some("uf2".to_string());
+        });
+        assert_eq!(c, "xiao-generate --chip xiao-nrf52840");
+    }
+
+    #[test]
     fn tui_resolution_of_esp_variant_is_ready() {
         let (_, readiness) = Config::resolve_for_tui(raw("xiao-esp32c3")).unwrap();
         assert!(matches!(readiness, Readiness::Ready), "ESP variant should be Ready");
@@ -1297,13 +1422,13 @@ mod tests {
             assert!(!category_live(esp_idf, cat));
             assert!(category_grey_reason(esp_idf, cat).is_some());
         }
-        // non-ESP (M4) → FRAMEWORK is live; flashing/logging are not baked into
-        // the generated project, so they stay greyed.
-        assert!(category_live(rp, ToolCategory::Framework));
-        assert!(category_grey_reason(rp, ToolCategory::Framework).is_none());
-        assert!(!category_live(rp, ToolCategory::Flashing));
-        assert!(category_grey_reason(rp, ToolCategory::Flashing).is_some());
-        assert!(!category_live(rp, ToolCategory::Logging));
+        // non-ESP → all three axes are live now (flashing selects the flash route,
+        // logging wires defmt, framework picks the body); nothing greys at the
+        // section level.
+        for cat in ToolCategory::ALL {
+            assert!(category_live(rp, cat), "non-ESP: {cat:?} is live");
+            assert!(category_grey_reason(rp, cat).is_none(), "non-ESP: {cat:?} header is bare");
+        }
     }
 
     #[test]

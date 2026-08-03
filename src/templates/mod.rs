@@ -179,6 +179,44 @@ pub fn render(body: &str, led: Option<crate::registry::Led>) -> String {
     }
 }
 
+/// Render a non-ESP base body: LED substitution (via [`render`]) plus, when
+/// `defmt` is set, the defmt wiring — the global logger (`use defmt_rtt as _;`)
+/// and one real `defmt::info!` before the blink loop. Kept a plain textual
+/// transform, exactly like `render`: the bodies are real Rust, and the two
+/// insertion points are stable across every non-ESP body — each declares a panic
+/// handler (`use panic_halt as _;`, or the SAMD21 BSP body's
+/// `extern crate panic_halt;`) and has a single `loop {`. With `defmt = false`
+/// the output is byte-identical to `render` (logging = none changes nothing).
+pub fn nonesp_render(body: &str, led: Option<crate::registry::Led>, defmt: bool) -> String {
+    let rendered = render(body, led);
+    if !defmt {
+        return rendered;
+    }
+    let mut out = String::with_capacity(rendered.len() + 128);
+    let mut logger_added = false;
+    let mut info_added = false;
+    for line in rendered.split_inclusive('\n') {
+        // One real defmt log immediately before the blink loop, at the loop's own
+        // indentation, so the setup does something observable.
+        if !info_added && line.trim_start().starts_with("loop {") {
+            let indent = &line[..line.len() - line.trim_start().len()];
+            out.push_str(indent);
+            out.push_str("defmt::info!(\"XIAO up, blinking the onboard LED\");\n\n");
+            info_added = true;
+        }
+        out.push_str(line);
+        // The defmt global logger is pulled in right after the panic-handler
+        // import (matched on the underscore form used by the `use`/`extern crate`
+        // line — the hyphenated `panic-halt` in some header comments never trips
+        // it). `as _` links it for its `#[global_logger]` side effect only.
+        if !logger_added && line.contains("panic_halt") {
+            out.push_str("use defmt_rtt as _; // defmt global logger (RTT transport)\n");
+            logger_added = true;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use toml_edit::DocumentMut;

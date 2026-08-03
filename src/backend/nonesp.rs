@@ -44,11 +44,13 @@ pub fn scaffold(cfg: &Config) -> Result<()> {
         let body = templates::memory_x(id)
             .with_context(|| format!("internal error: no memory.x body for id '{id}'"))?;
         write(out.join("memory.x"), body)?;
-        write(out.join("build.rs"), &build_rs(sc))?;
+        write(out.join("build.rs"), &build_rs(cfg, sc))?;
     }
 
     // The base `src/main.rs`. Component add-ons (none are ungated on non-ESP in
-    // M4) are layered on afterwards by `patch::install_main`.
+    // M4) are layered on afterwards by `patch::install_main`. When `--logging
+    // defmt`, `nonesp_render` also threads in the defmt global logger + one
+    // `defmt::info!` (the deps and the `-Tdefmt.x` link arg are added above/below).
     let body = templates::nonesp_base_body(cfg.variant.chip, cfg.stack.id, cfg.framework.id)
         .with_context(|| {
             format!(
@@ -56,9 +58,18 @@ pub fn scaffold(cfg: &Config) -> Result<()> {
                 cfg.variant.chip, cfg.stack.id, cfg.framework.id
             )
         })?;
-    write(out.join("src/main.rs"), &templates::render(body, cfg.variant.led))?;
+    write(
+        out.join("src/main.rs"),
+        &templates::nonesp_render(body, cfg.variant.led, defmt_on(cfg)),
+    )?;
 
     Ok(())
+}
+
+/// Whether this project wires in defmt logging (`--logging defmt`). On the non-ESP
+/// scaffold `defmt` is the only non-`none` logging choice.
+fn defmt_on(cfg: &Config) -> bool {
+    cfg.logging.id == "defmt"
 }
 
 fn write(path: std::path::PathBuf, contents: &str) -> Result<()> {
@@ -112,6 +123,18 @@ fn cargo_toml(cfg: &Config, sc: &Scaffold) -> Result<String> {
             crate::patch::add_dep(&mut deps, d.name, d.spec)?;
         }
     }
+    // `--logging defmt`: the defmt macros + the RTT global logger. Added as plain
+    // deps (no HAL `defmt` feature is enabled), so they compose with any HAL. The
+    // `-Tdefmt.x` link arg goes into the rustflags / build.rs below, and the base
+    // body is rendered with the logger + a `defmt::info!` by `nonesp_render`.
+    if defmt_on(cfg) {
+        crate::patch::add_dep(&mut deps, "defmt", &format!(r#""{}""#, registry::DEFMT_VERSION))?;
+        crate::patch::add_dep(
+            &mut deps,
+            "defmt-rtt",
+            &format!(r#""{}""#, registry::DEFMT_RTT_VERSION),
+        )?;
+    }
     doc["dependencies"] = Item::Table(deps);
 
     // Bare-metal debug builds are large; -O1 keeps them comfortably inside the
@@ -143,9 +166,18 @@ fn cargo_toml(cfg: &Config, sc: &Scaffold) -> Result<String> {
 /// in tests/generate.rs.
 fn cargo_config(cfg: &Config, sc: &Scaffold) -> String {
     let mut s = format!("[build]\ntarget = \"{}\"\n", cfg.stack.target);
-    if !sc.rustflags.is_empty() {
+    // `--logging defmt` needs `-Tdefmt.x`, which must follow `link.x`. A stack
+    // that carries its link scripts in rustflags (every stack but embassy-rp on
+    // RP2040, which routes them through build.rs) gets defmt.x appended here; the
+    // one build.rs stack gets it there instead (see `build_rs`).
+    let mut rustflags: Vec<&str> = sc.rustflags.to_vec();
+    if defmt_on(cfg) && !sc.rustflags.is_empty() {
+        rustflags.push("-C");
+        rustflags.push("link-arg=-Tdefmt.x");
+    }
+    if !rustflags.is_empty() {
         s.push_str(&format!("\n[target.{}]\nrustflags = [\n", cfg.stack.target));
-        for chunk in sc.rustflags.chunks(2) {
+        for chunk in rustflags.chunks(2) {
             let rendered = chunk
                 .iter()
                 .map(|a| format!("\"{a}\""))
@@ -158,9 +190,15 @@ fn cargo_config(cfg: &Config, sc: &Scaffold) -> String {
     s
 }
 
-fn build_rs(sc: &Scaffold) -> String {
-    let extra = sc
-        .link_args
+fn build_rs(cfg: &Config, sc: &Scaffold) -> String {
+    // See `cargo_config`: only a stack with EMPTY rustflags carries its link args
+    // through build.rs, so that is where its defmt.x goes (appended last, after
+    // link.x / link-rp.x).
+    let mut link_args: Vec<&str> = sc.link_args.to_vec();
+    if defmt_on(cfg) && sc.rustflags.is_empty() {
+        link_args.push("-Tdefmt.x");
+    }
+    let extra = link_args
         .iter()
         .map(|a| format!("    println!(\"cargo:rustc-link-arg-bins={a}\");\n"))
         .collect::<String>();

@@ -400,12 +400,22 @@ fn print_summary(cfg: &Config) {
     println!("  crate:        {}", cfg.project_name);
     println!("  stack:        {} ({})", cfg.stack.id, cfg.stack.display);
     println!("  target:       {}", cfg.stack.target);
-    if model::option_groups_apply(cfg) {
-        println!("  flashing:     {}", cfg.flashing.display);
-        println!("  logging:      {}", cfg.logging.display);
+    if model::summary_shows_toolchain(cfg) {
+        // esp-hal base + every non-ESP project. Flashing carries the external-probe
+        // note where it applies (probe-rs off ESP); logging carries the RTT-view
+        // note for defmt off ESP — both derived from the same builtin_debug fact.
+        match model::flashing_probe_note(cfg.stack, cfg.flashing) {
+            Some(note) => println!("  flashing:     {} ({note})", cfg.flashing.display),
+            None => println!("  flashing:     {}", cfg.flashing.display),
+        }
+        match model::defmt_view_note(cfg.stack, cfg.logging) {
+            Some(note) => println!("  logging:      {} ({note})", cfg.logging.display),
+            None => println!("  logging:      {}", cfg.logging.display),
+        }
         println!("  framework:    {}", cfg.framework.display);
     } else if model::category_live(cfg.stack, registry::ToolCategory::Framework) {
-        // Non-ESP scaffold: framework is the one live toolchain axis.
+        // esp-hal component add-on: the option groups are locked to the template,
+        // but framework is still the live axis — shown alone, as before.
         println!("  framework:    {}", cfg.framework.display);
     }
     println!("  µFerris BSP:  {}", uferris_line);

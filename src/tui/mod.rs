@@ -12,9 +12,10 @@
 //!
 //! Layout (top to bottom):
 //!   TARGET          Device (cycler) + Stack (radio list)
-//!   FLASHING TOOL   radio list — full catalog, unsupported greyed
-//!   LOGGING         radio list
-//!   FRAMEWORK       radio list
+//!   FLASHING TOOL   radio list — the stack's supported flashing tools (its
+//!                   support list, no-probe route first), not the full catalog
+//!   LOGGING         radio list — the stack's supported logging frontends
+//!   FRAMEWORK       radio list — the full catalog, unsupported/gapped greyed
 //!   BSP SUPPORT     "Enable µFerris BSP" toggle + power/async (greyed until
 //!                   enabled) + a dim note about future template selection
 //!
@@ -34,8 +35,11 @@
 //! generation path. All grey-out decisions derive from registry data via the pure
 //! helpers in `model` (`category_live` / `category_grey_reason` for the section
 //! headers, `choice_grey_reason` for individual rows) — no fabricated data, no
-//! per-variant UI logic. Section greying is PER-CATEGORY: on the non-ESP scaffold
-//! FRAMEWORK is a live axis while flashing and logging are display-only.
+//! per-variant UI logic. On esp-hal and the non-ESP scaffold all three sections
+//! are live; on esp-idf all three are template-owned (greyed). FLASHING and
+//! LOGGING render only the stack's supported entries (so the wrong-device flashers
+//! never appear); FRAMEWORK keeps the full catalog so declared gaps (RTIC,
+//! embassy-on-a-blocking-HAL) stay visible-but-greyed.
 //!
 //! The draw functions are pure over `(&App, &Theme)`, so the whole page is
 //! rendered headless into a `TestBackend` buffer in the tests below.
@@ -365,7 +369,9 @@ impl App {
                 if !self.cat_live(cat) {
                     continue;
                 }
-                for i in 0..cat.catalog().len() {
+                // In display order (see `section_indices`), so keyboard focus
+                // traversal matches what is on screen.
+                for i in section_indices(self.current_stack(), cat) {
                     if self.choice_grey(cat, i).is_none() {
                         rows.push(cat_row(cat, i));
                     }
@@ -840,13 +846,15 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ));
     }
 
-    // ---- FLASHING TOOL / LOGGING / FRAMEWORK — full catalogs ----
-    // Greying is PER-CATEGORY, not per-stack: the non-ESP scaffold keeps FRAMEWORK
-    // live (embassy really is generatable on the embassy HALs) while flashing and
-    // logging stay display-only, so each section asks its own question.
-    // With µFerris ON (only possible on the esp-hal axis) the BSP supplies its
-    // own toolchain, so these three sections go INACTIVE: dim heading, no reason
-    // text, every radio an empty dim `( )`, none focusable.
+    // ---- FLASHING TOOL / LOGGING / FRAMEWORK ----
+    // FLASHING and LOGGING render only the stack's supported entries, in support-
+    // list order (its no-probe/none default first) — the wrong-device flashers and
+    // the ESP-only `log` frontend simply do not appear. FRAMEWORK keeps the full
+    // catalog so declared gaps (RTIC, embassy on a blocking HAL) stay
+    // visible-but-greyed with a reason. probe-rs (off ESP) and defmt (off ESP)
+    // carry a short "needs a probe" hint. With µFerris ON (esp-hal only) the BSP
+    // supplies its own toolchain, so these sections go INACTIVE: dim heading, every
+    // radio an empty dim `( )`, none focusable.
     let uferris_suppress = app.uferris_on;
     for cat in ToolCategory::ALL {
         let section_reason = model::category_grey_reason(s, cat);
@@ -861,23 +869,35 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             lines.push(section_heading(theme, cat, section_reason));
         }
         let sel = app.cat_idx(cat);
-        for (i, choice) in cat.catalog().iter().enumerate() {
+        for i in section_indices(s, cat) {
+            let choice = &cat.catalog()[i];
             let supported = s.support(cat).contains(&choice.id);
             let (focused, selected, greyed, inactive) = if uferris_suppress {
                 // µFerris owns the toolchain: no selection, all dim, none focusable.
                 (false, false, false, true)
             } else if live {
-                // Greying is still registry-derived, but the per-option reason
-                // text is no longer shown beside the row — the dim `(-)` marker is
-                // enough, and any section-level reason lives at the header.
+                // Greying is registry-derived; the per-option reason text is not
+                // shown beside the row — the dim `(-)` marker is enough, and any
+                // section-level reason lives at the header.
                 let greyed = app.choice_grey(cat, i).is_some();
                 (focus == cat_row(cat, i), i == sel, greyed, false)
             } else {
-                // Disabled section: everything dim; still show which entries a
-                // device supports (default = selected marker), unsupported = (-).
+                // Disabled section (esp-idf FRAMEWORK): everything dim; show which
+                // entries a device supports (default = selected), unsupported = (-).
                 (false, supported && i == sel, !supported, false)
             };
-            lines.push(radio_line(theme, focused, selected, greyed, inactive, "  ", choice.display, ""));
+            // The "needs a probe" hints — only where a probe is actually required
+            // (probe-rs / defmt off ESP), and only on a live, non-µFerris axis.
+            let hint = if uferris_suppress || !live {
+                ""
+            } else {
+                match cat {
+                    ToolCategory::Flashing => model::flashing_probe_note(s, choice).unwrap_or(""),
+                    ToolCategory::Logging => model::defmt_view_note(s, choice).unwrap_or(""),
+                    ToolCategory::Framework => "",
+                }
+            };
+            lines.push(radio_line(theme, focused, selected, greyed, inactive, "  ", choice.display, hint));
         }
     }
 
@@ -973,6 +993,23 @@ fn cat_row(cat: ToolCategory, i: usize) -> Row {
     }
 }
 
+/// The catalog indices a toolchain section shows, in display order: FLASHING and
+/// LOGGING follow the stack's support list (its no-probe/none default first, and
+/// the unsupported catalog entries omitted entirely); FRAMEWORK is the whole
+/// catalog so declared gaps stay visible-but-greyed. Shared by the section
+/// renderer and the focus model, so keyboard focus order always matches the
+/// on-screen order.
+fn section_indices(stack: &Stack, cat: ToolCategory) -> Vec<usize> {
+    match cat {
+        ToolCategory::Framework => (0..cat.catalog().len()).collect(),
+        _ => stack
+            .support(cat)
+            .iter()
+            .filter_map(|id| cat.catalog().iter().position(|c| c.id == *id))
+            .collect(),
+    }
+}
+
 fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -994,10 +1031,19 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             lines.push(row("Stack:", cfg.stack.display.to_string()));
             lines.push(row("Target:", cfg.stack.target.to_string()));
 
-            // Universal toolchain — only on the live esp-hal base axis.
-            if model::option_groups_apply(&cfg) {
-                lines.push(row("Flashing:", cfg.flashing.display.to_string()));
-                lines.push(row("Logging:", cfg.logging.display.to_string()));
+            // Universal toolchain — the esp-hal base axis and every non-ESP
+            // project. probe-rs / defmt carry their "needs a probe" note off ESP.
+            if model::summary_shows_toolchain(&cfg) {
+                let flash = match model::flashing_probe_note(cfg.stack, cfg.flashing) {
+                    Some(n) => format!("{} · {}", cfg.flashing.display, n),
+                    None => cfg.flashing.display.to_string(),
+                };
+                lines.push(row("Flashing:", flash));
+                let log = match model::defmt_view_note(cfg.stack, cfg.logging) {
+                    Some(n) => format!("{} · {}", cfg.logging.display, n),
+                    None => cfg.logging.display.to_string(),
+                };
+                lines.push(row("Logging:", log));
                 lines.push(row("Framework:", cfg.framework.display.to_string()));
             }
 
@@ -1314,83 +1360,103 @@ mod tests {
         assert!(!s.contains("not on the esp-idf/std stack"), "no per-option µFerris reason:\n{s}");
     }
 
-    /// M4: non-ESP generates for real, so the three sections are no longer greyed
-    /// as a block. FLASHING + LOGGING stay display-only (the scaffold ships no
-    /// runner and no logging frontend), FRAMEWORK is a live axis, and the whole
-    /// selection resolves to a generatable `Config` — not a gate.
+    /// Non-ESP now has all three toolchain axes live. FLASHING and LOGGING render
+    /// only the stack's supported entries (no wrong-device flashers, no ESP-only
+    /// `log`); probe-rs / defmt carry a "needs a probe" hint; FRAMEWORK keeps the
+    /// full catalog with its gaps (RTIC, embassy-on-a-blocking-HAL) greyed.
     #[test]
-    fn non_esp_greys_flashing_and_logging_but_keeps_framework_live() {
+    fn non_esp_flashing_and_logging_are_live_and_show_only_supported() {
         let app = app_on("xiao-rp2040", 0); // rp2040-hal — the blocking HAL
         let s = render(&app, W, H);
 
-        // The pre-M4 world is gone: no "until M4" banner, no gate in the summary.
-        assert!(!s.contains("until M4"), "non-ESP is no longer gated until M4:\n{s}");
-        assert!(!s.contains("NOT YET GENERATABLE"), "non-ESP generates for real now:\n{s}");
+        assert!(!s.contains("NOT YET GENERATABLE"), "non-ESP generates for real:\n{s}");
         assert!(s.contains("READY"), "non-ESP selection is ready to generate:\n{s}");
 
-        // Flashing + logging carry the per-category reason at their headers…
-        let reason = "chosen by your own tooling, not baked into the project";
-        assert_eq!(
-            s.matches(reason).count(),
-            2,
-            "exactly the flashing + logging headers carry the non-ESP reason:\n{s}"
+        // The old display-only reason is gone from the flashing/logging headers.
+        assert!(
+            !s.contains("chosen by your own tooling"),
+            "flashing/logging are live now — no display-only header reason:\n{s}"
         );
-        // …and FRAMEWORK does NOT (it is live, so its header is bare).
-        let framework_hdr = s.lines().find(|l| l.contains("FRAMEWORK")).unwrap();
-        assert!(!framework_hdr.contains(reason), "FRAMEWORK header must be bare: {framework_hdr}");
 
-        // RTIC is a real catalog entry on the ARM part: visible, but greyed —
-        // there is no verified RTIC body, which `choice_grey_reason` reports.
+        // FLASHING: the board's supported tools only (picotool default + probe-rs).
+        assert!(s.contains("(•) picotool"), "picotool is the RP flash default:\n{s}");
+        assert!(s.contains("( ) probe-rs"), "probe-rs offered as the probe route:\n{s}");
+        for absent in ["espflash", "UF2 bootloader", "hf2 ("] {
+            assert!(!s.contains(absent), "wrong-device flasher `{absent}` must not appear:\n{s}");
+        }
+        // probe-rs carries the external-probe hint off ESP.
+        assert!(
+            s.contains("requires an external SWD debug probe"),
+            "probe hint beside probe-rs:\n{s}"
+        );
+
+        // LOGGING: none/defmt only — the ESP-only `log` frontend is absent.
+        assert!(s.contains("(•) none"), "none is the logging default:\n{s}");
+        assert!(s.contains("( ) defmt"), "defmt offered on the Cortex-M board:\n{s}");
+        assert!(!s.contains(") log"), "ESP-only `log` must not render on non-ESP:\n{s}");
+        assert!(s.contains("needs a debug probe attached"), "defmt RTT hint present:\n{s}");
+
+        // FRAMEWORK keeps the full catalog: RTIC + embassy visible-but-greyed here.
         assert!(s.contains("(-) RTIC"), "RTIC visible but greyed on the ARM part:\n{s}");
+        assert!(s.contains("(-) embassy"), "embassy greyed on the blocking HAL:\n{s}");
         assert!(
             app.choice_grey(ToolCategory::Framework, cat_pos(ToolCategory::Framework, "rtic"))
                 .is_some(),
             "RTIC must carry a grey reason"
         );
-        // On this blocking HAL `embassy` is a declared gap too.
-        assert!(s.contains("(-) embassy"), "embassy greyed on the blocking HAL:\n{s}");
 
-        // Only the FRAMEWORK section contributes focusable rows.
+        // All three sections now contribute focusable rows.
         let rows = app.focusable_rows();
-        assert!(
-            rows.iter().any(|r| matches!(r, Row::Framework(_))),
-            "FRAMEWORK is focusable on non-ESP: {rows:?}"
-        );
-        for r in &rows {
-            assert!(
-                !matches!(r, Row::Flashing(_) | Row::Logging(_)),
-                "flashing/logging must not be focusable on non-ESP: {rows:?}"
-            );
-        }
+        assert!(rows.iter().any(|r| matches!(r, Row::Flashing(_))), "flashing focusable: {rows:?}");
+        assert!(rows.iter().any(|r| matches!(r, Row::Logging(_))), "logging focusable: {rows:?}");
+        assert!(rows.iter().any(|r| matches!(r, Row::Framework(_))), "framework focusable: {rows:?}");
     }
 
-    /// The guard the M4 implementer called out: `Config::resolve` REJECTS a
-    /// flashing/logging value on a stack where that category is not live, so the
-    /// TUI must keep passing `None` for those two on non-ESP even now that it
-    /// forwards FRAMEWORK. Verified by actually resolving, not by inspection.
+    /// non-ESP now forwards ALL THREE toolchain selections (all live), and the
+    /// resolve succeeds. The forwarded flashing default is the board's no-probe
+    /// route, logging defaults to `none`.
     #[test]
-    fn non_esp_raw_config_omits_flashing_and_logging_but_forwards_framework() {
+    fn non_esp_raw_config_forwards_all_three_toolchain_selections() {
         for stack_idx in [0, 1] {
             let app = app_on("xiao-rp2040", stack_idx);
             let raw = app.raw_config();
-            assert!(raw.flashing.is_none(), "flashing must stay None on non-ESP (stack {stack_idx})");
-            assert!(raw.logging.is_none(), "logging must stay None on non-ESP (stack {stack_idx})");
-            assert!(
-                raw.framework.is_some(),
-                "framework IS forwarded on non-ESP (stack {stack_idx})"
-            );
+            assert!(raw.flashing.is_some(), "flashing forwarded on non-ESP (stack {stack_idx})");
+            assert!(raw.logging.is_some(), "logging forwarded on non-ESP (stack {stack_idx})");
+            assert!(raw.framework.is_some(), "framework forwarded on non-ESP (stack {stack_idx})");
 
-            // …and the resolve actually succeeds (this is what would break if a
-            // flashing/logging id leaked through).
             let (cfg, readiness) = app
                 .resolved()
                 .unwrap_or_else(|e| panic!("non-ESP stack {stack_idx} must resolve, got: {e}"));
-            assert!(
-                matches!(readiness, Readiness::Ready),
-                "non-ESP is generatable since M4 (stack {stack_idx})"
-            );
+            assert!(matches!(readiness, Readiness::Ready), "non-ESP generatable (stack {stack_idx})");
             assert_eq!(cfg.variant.id, "xiao-rp2040");
+            assert_eq!(cfg.flashing.id, "picotool", "forwarded flashing is the no-probe default");
+            assert_eq!(cfg.logging.id, "none", "forwarded logging default is none");
         }
+    }
+
+    /// Selecting the probe / defmt routes on a Cortex-M board works end to end and
+    /// surfaces the "needs a probe" notes in the command + summary.
+    #[test]
+    fn non_esp_probe_rs_and_defmt_are_selectable_with_notes() {
+        let mut app = app_on("xiao-nrf52840", 0); // nrf-hal
+        assert!(render(&app, W, H).contains("(•) UF2 bootloader"), "UF2 is the nRF flash default");
+
+        app.focus = Row::Flashing(cat_pos(ToolCategory::Flashing, "probe-rs"));
+        app.activate();
+        app.focus = Row::Logging(cat_pos(ToolCategory::Logging, "defmt"));
+        app.activate();
+        let s = render(&app, W, H);
+
+        assert!(s.contains("(•) probe-rs"), "probe-rs selected:\n{s}");
+        assert!(s.contains("(•) defmt"), "defmt selected:\n{s}");
+        let (cfg, _) = app.resolved().expect("probe-rs + defmt on nrf-hal must resolve");
+        assert_eq!(cfg.flashing.id, "probe-rs");
+        assert_eq!(cfg.logging.id, "defmt");
+        assert!(flat(&s).contains("--flashing probe-rs"), "command carries the flasher:\n{s}");
+        assert!(flat(&s).contains("--logging defmt"), "command carries the logger:\n{s}");
+        // Both "needs a probe" notes reach the summary.
+        assert!(flat(&s).contains("requires an external SWD debug probe"), "probe note in summary:\n{s}");
+        assert!(flat(&s).contains("needs a debug probe attached"), "defmt note in summary:\n{s}");
     }
 
     /// `embassy` is selectable and generatable on an embassy HAL, and refused on a
@@ -1938,10 +2004,12 @@ mod tests {
         // (d) esp-idf std stack — sections greyed.
         dump("(d) esp-idf std — xiao-esp32s3 / esp-idf, sections greyed", &app_on("xiao-esp32s3", 1));
 
-        // (e) non-ESP, blocking HAL — flashing/logging greyed, FRAMEWORK live but
-        // `embassy` greyed (no time driver on the blocking HAL), RTIC greyed.
+        // (e) non-ESP, blocking HAL — FLASHING lists the no-probe route (picotool)
+        // + probe-rs with the probe note; LOGGING lists none + defmt; FRAMEWORK is
+        // live with `embassy` greyed (no time driver on the blocking HAL) and RTIC
+        // greyed.
         dump(
-            "(e) non-ESP — xiao-rp2040 / rp2040-hal (flashing+logging greyed, FRAMEWORK live, embassy greyed)",
+            "(e) non-ESP — xiao-rp2040 / rp2040-hal (flashing picotool+probe-rs, logging none+defmt, FRAMEWORK live)",
             &app_on("xiao-rp2040", 0),
         );
 

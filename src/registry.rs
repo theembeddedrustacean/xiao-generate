@@ -46,6 +46,13 @@ pub const NRF52840_HAL_VERSION: &str = "0.19";
 pub const XIAO_M0_BSP_VERSION: &str = "0.13.0";
 pub const EMBASSY_RP_VERSION: &str = "0.10";
 pub const EMBASSY_NRF_VERSION: &str = "0.11";
+// defmt logging, wired into the non-ESP scaffold under `--logging defmt`. The
+// 0.3/0.4 pairing (defmt-rtt 0.4 depends on defmt 0.3) is compile-verified
+// against every non-ESP HAL pinned above — see the M-flashing/logging report.
+// defmt is added as a plain dependency (no HAL `defmt` feature is enabled), so it
+// composes with each HAL independently of the HAL's own version.
+pub const DEFMT_VERSION: &str = "0.3";
+pub const DEFMT_RTT_VERSION: &str = "0.4";
 // The two framework pins live inside the literal TOML specs of
 // `EMBASSY_FRAMEWORK_DEPS` (a `Dep.spec` is a `&'static str`, so it cannot be
 // assembled from consts). They are declared here as the documented
@@ -161,15 +168,22 @@ pub struct Stack {
     pub frameworks: &'static [&'static str],
     /// Direct-scaffold data for the non-ESP backend (M4). `None` on ESP stacks.
     pub scaffold: Option<&'static Scaffold>,
+    /// Whether this stack's chip carries a **built-in debug interface** (the ESP
+    /// parts' USB-Serial-JTAG). When true, `probe-rs` needs no *external* SWD probe
+    /// — the chip is its own probe over the USB-C cable — so the "needs an external
+    /// debug probe" note is suppressed. `true` on both ESP stacks (esp-hal and
+    /// esp-idf); `false` on every Cortex-M stack, where `probe-rs`/RTT really do
+    /// require an external probe. Pairs with [`ToolChoice::needs_probe`].
+    pub builtin_debug: bool,
     /// [`PREREQS`] ids needed to BUILD a project on this stack, **beyond** the
     /// target/toolchain — that one is always derived from [`Stack::target`],
     /// whose triple is itself a `PREREQS` id, so it is never repeated here.
     pub build_prereqs: &'static [&'static str],
-    /// [`PREREQS`] ids needed to FLASH a project from this stack. Empty on the
-    /// stacks where FLASHING is a live user choice (esp-hal): there the
-    /// prerequisites come from the chosen [`ToolChoice`] instead, so the summary
-    /// follows `--flashing`. Elsewhere the flash route is fixed by the board's
-    /// bootloader (or by the template's cargo runner) and lives here.
+    /// [`PREREQS`] ids needed to FLASH a project from this stack. Empty on every
+    /// stack where FLASHING is a live user choice (esp-hal AND the non-ESP
+    /// scaffolds): there the prerequisites come from the chosen [`ToolChoice`]
+    /// instead, so the summary follows `--flashing`. Only esp-idf fixes the flash
+    /// route here (its template's cargo runner is espflash).
     pub flash_prereqs: &'static [&'static str],
 }
 
@@ -404,26 +418,41 @@ pub struct ToolChoice {
     /// (internal; never surfaced). `&[]` for "none"/unmapped choices.
     pub esp_options: &'static [&'static str],
     /// [`PREREQS`] ids this choice needs on the host. Populated for the flashing
-    /// tools (picking `probe-rs` over `espflash` genuinely changes what must be
+    /// tools (picking `probe-rs` over `picotool` genuinely changes what must be
     /// installed); `&[]` for the logging/framework catalogs, whose choices are
     /// plain cargo dependencies and add no host tool.
     pub prereqs: &'static [&'static str],
+    /// Whether this flashing tool drives the board over an external SWD debug
+    /// probe (only `probe-rs`). Every no-probe route — espflash, picotool, the two
+    /// UF2 bootloader flashers — is `false`. Combined with [`Stack::builtin_debug`]
+    /// this decides the "needs an external debug probe" note: `probe-rs` needs one
+    /// on the Cortex-M parts but NOT on ESP (built-in USB-Serial-JTAG). `false`
+    /// for the logging/framework catalogs, which are not flashing tools.
+    pub needs_probe: bool,
 }
 
-/// Flashing tools (universal). espflash + probe-rs are the two flashing tools;
-/// espflash is the esp-hal default, probe-rs the debug-probe path.
+/// Flashing tools (universal). Two families: the **no-probe** routes that need
+/// only the USB-C cable — espflash (ESP), picotool (RP BOOTSEL), and the two UF2
+/// bootloader flashers (uf2conv for the nRF Adafruit bootloader, hf2 for the
+/// SAMD21/UF2 HID bootloader) — and `probe-rs`, the external-SWD-debug-probe path.
+/// Each stack's support list leads with its no-probe route (the default) so the
+/// out-of-the-box flash needs no extra hardware.
 pub const FLASHING_TOOLS: &[ToolChoice] = &[
-    ToolChoice { id: "espflash", display: "espflash", esp_options: &["esp-backtrace"], prereqs: &["espflash"] },
-    ToolChoice { id: "probe-rs", display: "probe-rs", esp_options: &["probe-rs", "panic-rtt-target"], prereqs: &["probe-rs"] },
+    ToolChoice { id: "espflash", display: "espflash", esp_options: &["esp-backtrace"], prereqs: &["espflash"], needs_probe: false },
+    ToolChoice { id: "probe-rs", display: "probe-rs", esp_options: &["probe-rs", "panic-rtt-target"], prereqs: &["probe-rs"], needs_probe: true },
+    ToolChoice { id: "picotool", display: "picotool", esp_options: &[], prereqs: &["picotool"], needs_probe: false },
+    ToolChoice { id: "uf2", display: "UF2 bootloader", esp_options: &[], prereqs: &["rust-objcopy", "uf2conv"], needs_probe: false },
+    ToolChoice { id: "hf2", display: "hf2 (UF2 bootloader)", esp_options: &[], prereqs: &["hf2"], needs_probe: false },
 ];
 
 /// Logging frontends (universal). On esp-hal, `log` is mutually exclusive with a
 /// probe-rs flashing tool (constraint graph) — that greying is derived, not
-/// hand-coded.
+/// hand-coded. `log` is the esp-println path and is ESP-only; the non-ESP stacks
+/// support `none`/`defmt` (defmt is wired into the direct scaffold).
 pub const LOGGING: &[ToolChoice] = &[
-    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[] },
-    ToolChoice { id: "log", display: "log", esp_options: &["log"], prereqs: &[] },
-    ToolChoice { id: "defmt", display: "defmt", esp_options: &["defmt"], prereqs: &[] },
+    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[], needs_probe: false },
+    ToolChoice { id: "log", display: "log", esp_options: &["log"], prereqs: &[], needs_probe: false },
+    ToolChoice { id: "defmt", display: "defmt", esp_options: &["defmt"], prereqs: &[], needs_probe: false },
 ];
 
 /// Application frameworks (universal). embassy is the async framework (wired on
@@ -431,9 +460,9 @@ pub const LOGGING: &[ToolChoice] = &[
 /// — it greys on ESP; on the ARM parts it is a declared framework gap until an
 /// RTIC body is compile-verified, see `Scaffold::framework_gaps`).
 pub const FRAMEWORKS: &[ToolChoice] = &[
-    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[] },
-    ToolChoice { id: "embassy", display: "embassy", esp_options: &["embassy", "unstable-hal"], prereqs: &[] },
-    ToolChoice { id: "rtic", display: "RTIC", esp_options: &[], prereqs: &[] },
+    ToolChoice { id: "none", display: "none", esp_options: &[], prereqs: &[], needs_probe: false },
+    ToolChoice { id: "embassy", display: "embassy", esp_options: &["embassy", "unstable-hal"], prereqs: &[], needs_probe: false },
+    ToolChoice { id: "rtic", display: "RTIC", esp_options: &[], prereqs: &[], needs_probe: false },
 ];
 
 /// The three universal toolchain categories, in display order.
@@ -874,21 +903,16 @@ const NO_PREREQS: &[&str] = &[];
 /// tools esp-idf-sys needs to bootstrap the SDK.
 const ESP_IDF_BUILD_PREREQS: &[&str] = &["ldproxy", "python3", "git"];
 /// The esp-idf template's cargo runner is espflash, and FLASHING is not a live
-/// axis on that stack (the template owns it), so it is stack data here.
+/// axis on that stack (the template owns it), so it is stack data here. Every
+/// other stack (esp-hal AND the non-ESP scaffolds) leaves `flash_prereqs` empty
+/// and derives the flash route from the chosen [`ToolChoice`] instead.
 const ESP_FLASH_PREREQS: &[&str] = &["espflash"];
-/// RP2040 / RP2350 over USB (BOOTSEL mass storage). picotool reads the ELF
-/// directly, so no objcopy/UF2 conversion is needed.
-const RP_FLASH_PREREQS: &[&str] = &["picotool"];
-/// nRF52840 over USB (Adafruit nRF52 UF2 bootloader, double-tap RESET): the ELF
-/// must be objcopy'd to a raw binary and then converted to UF2.
-const NRF_FLASH_PREREQS: &[&str] = &["rust-objcopy", "uf2conv"];
-/// SAMD21 over USB (Seeed uf2-samdx1 bootloader): hf2 takes the ELF directly.
-const SAMD_FLASH_PREREQS: &[&str] = &["hf2"];
 
 // --- Per-stack support lists (which universal entries a stack offers) ---
-// esp-hal wires all three categories; the non-ESP scaffold wires the FRAMEWORK
-// category only (bare-metal vs embassy) — its flashing/logging entries are
-// grounded display data that drive greying but never generation (M4).
+// Every non-esp-idf stack wires all three categories. FLASHING and LOGGING lead
+// with the device's real default: the no-probe flash route, and `none` logging.
+// The unsupported catalog entries never appear (the TUI renders the support list,
+// not the full catalog with greyed rows).
 
 /// esp-hal (ESP no_std) — the wired axis.
 const ESP_HAL_FLASHING: &[&str] = &["espflash", "probe-rs"];
@@ -899,13 +923,18 @@ const ESP_HAL_FRAMEWORKS: &[&str] = &["none", "embassy"];
 /// whole section is greyed (empty support).
 const IDF_NONE: &[&str] = &[];
 
-/// Non-ESP support lists. `frameworks` is a live axis (M4): `none` generates
-/// the blocking/no-executor body, `embassy` the executor body — but only on an
-/// embassy HAL, see `Scaffold::framework_gaps`. Flashing/logging are display-only.
-const RP_FLASHING: &[&str] = &["probe-rs"];
-const NRF_FLASHING: &[&str] = &["probe-rs"];
-const SAMD_FLASHING: &[&str] = &["probe-rs"];
-const ARM_LOGGING: &[&str] = &["none", "log", "defmt"];
+/// Non-ESP support lists. All three axes are live (M4 + this change):
+///  - FLASHING leads with the board's USB/UF2 no-probe route; `probe-rs` is the
+///    external-SWD-probe alternative. Flashing changes the reported flash
+///    prerequisites + summary, not the emitted code.
+///  - LOGGING is `none`/`defmt` — `log` (esp-println) has no non-ESP backend, so
+///    it is absent here; defmt is wired into the direct scaffold.
+///  - FRAMEWORK: `none` generates the blocking/no-executor body, `embassy` the
+///    executor body — but only on an embassy HAL, see `Scaffold::framework_gaps`.
+const RP_FLASHING: &[&str] = &["picotool", "probe-rs"];
+const NRF_FLASHING: &[&str] = &["uf2", "probe-rs"];
+const SAMD_FLASHING: &[&str] = &["hf2", "probe-rs"];
+const ARM_LOGGING: &[&str] = &["none", "defmt"];
 const RP_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
 const NRF_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
 const SAMD_FRAMEWORKS: &[&str] = &["none", "rtic"];
@@ -1301,6 +1330,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: NO_PREREQS,
                 flash_prereqs: NO_PREREQS,
             },
@@ -1315,6 +1345,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: ESP_IDF_BUILD_PREREQS,
                 flash_prereqs: ESP_FLASH_PREREQS,
             },
@@ -1342,6 +1373,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: NO_PREREQS,
                 flash_prereqs: NO_PREREQS,
             },
@@ -1356,6 +1388,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: ESP_IDF_BUILD_PREREQS,
                 flash_prereqs: ESP_FLASH_PREREQS,
             },
@@ -1383,6 +1416,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: NO_PREREQS,
                 flash_prereqs: NO_PREREQS,
             },
@@ -1397,6 +1431,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: ESP_IDF_BUILD_PREREQS,
                 flash_prereqs: ESP_FLASH_PREREQS,
             },
@@ -1424,6 +1459,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ESP_HAL_LOGGING,
                 frameworks: ESP_HAL_FRAMEWORKS,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: NO_PREREQS,
                 flash_prereqs: NO_PREREQS,
             },
@@ -1438,6 +1474,7 @@ pub const VARIANTS: &[Variant] = &[
                 logging: IDF_NONE,
                 frameworks: IDF_NONE,
                 scaffold: None,
+                builtin_debug: true,
                 build_prereqs: ESP_IDF_BUILD_PREREQS,
                 flash_prereqs: ESP_FLASH_PREREQS,
             },
@@ -1468,8 +1505,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&RP2040_HAL_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: RP_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "embassy-rp",
@@ -1482,8 +1520,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_RP2040_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: RP_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1509,8 +1548,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&RP235X_HAL_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: RP_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "embassy-rp",
@@ -1523,8 +1563,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_RP235X_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: RP_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1550,8 +1591,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&NRF_HAL_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: NRF_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "embassy-nrf",
@@ -1564,8 +1606,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_NRF_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: NRF_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1591,8 +1634,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&NRF_HAL_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: NRF_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
             Stack {
                 id: "embassy-nrf",
@@ -1605,8 +1649,9 @@ pub const VARIANTS: &[Variant] = &[
                 logging: ARM_LOGGING,
                 frameworks: NRF_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_NRF_SCAFFOLD),
+                builtin_debug: false,
                 build_prereqs: NO_PREREQS,
-                flash_prereqs: NRF_FLASH_PREREQS,
+                flash_prereqs: NO_PREREQS,
             },
         ],
         uferris_chip_feature: None,
@@ -1635,8 +1680,9 @@ pub const VARIANTS: &[Variant] = &[
             logging: ARM_LOGGING,
             frameworks: SAMD_FRAMEWORKS,
             scaffold: Some(&SAMD21_SCAFFOLD),
+            builtin_debug: false,
             build_prereqs: NO_PREREQS,
-            flash_prereqs: SAMD_FLASH_PREREQS,
+            flash_prereqs: NO_PREREQS,
         }],
         uferris_chip_feature: None,
         uferris_gap: None,
@@ -1944,7 +1990,7 @@ mod tests {
         // Three device-agnostic catalogs, in the documented order.
         assert_eq!(
             FLASHING_TOOLS.iter().map(|c| c.id).collect::<Vec<_>>(),
-            vec!["espflash", "probe-rs"]
+            vec!["espflash", "probe-rs", "picotool", "uf2", "hf2"]
         );
         assert_eq!(
             LOGGING.iter().map(|c| c.id).collect::<Vec<_>>(),
@@ -1958,6 +2004,18 @@ mod tests {
         assert_eq!(ToolCategory::Flashing.default_choice().id, "espflash");
         assert_eq!(ToolCategory::Logging.default_choice().id, "none");
         assert_eq!(ToolCategory::Framework.default_choice().id, "none");
+        // Exactly one flashing tool drives an external probe (probe-rs); every
+        // other route — espflash, picotool, the two UF2 flashers — is no-probe.
+        for c in FLASHING_TOOLS {
+            assert_eq!(c.needs_probe, c.id == "probe-rs", "needs_probe wrong for {}", c.id);
+        }
+        // needs_probe is a flashing property: the logging/framework catalogs never
+        // set it.
+        for cat in [ToolCategory::Logging, ToolCategory::Framework] {
+            for c in cat.catalog() {
+                assert!(!c.needs_probe, "{} '{}' must not set needs_probe", cat.flag(), c.id);
+            }
+        }
         // Every choice's internal esp mapping (if any) satisfies the graph.
         for cat in ToolCategory::ALL {
             for c in cat.catalog() {
@@ -1990,9 +2048,39 @@ mod tests {
         // non-ESP support sets, incl. RTIC on the ARM parts (a declared gap).
         let rp = variant("xiao-rp2040").unwrap().default_stack();
         assert!(rp.support(ToolCategory::Framework).contains(&"rtic"), "RTIC visible on RP");
+        // Each non-ESP stack leads its flashing support with the board's no-probe
+        // USB/UF2 route (the default), then probe-rs; logging is none/defmt (no
+        // esp-println `log`).
+        assert_eq!(rp.support(ToolCategory::Flashing), &["picotool", "probe-rs"]);
+        assert_eq!(rp.support(ToolCategory::Logging), &["none", "defmt"]);
+        assert_eq!(rp.default_tool(ToolCategory::Flashing).unwrap().id, "picotool");
+        let nrf = variant("xiao-nrf52840").unwrap().default_stack();
+        assert_eq!(nrf.support(ToolCategory::Flashing), &["uf2", "probe-rs"]);
         let samd = variant("xiao-samd21").unwrap().default_stack();
-        assert_eq!(samd.support(ToolCategory::Flashing), &["probe-rs"]);
+        assert_eq!(samd.support(ToolCategory::Flashing), &["hf2", "probe-rs"]);
+        assert_eq!(samd.support(ToolCategory::Logging), &["none", "defmt"]);
         assert_eq!(samd.support(ToolCategory::Framework), &["none", "rtic"]);
+    }
+
+    /// `builtin_debug` is set exactly on the ESP stacks (built-in USB-Serial-JTAG),
+    /// and every non-ESP flashing default is a no-probe route — so the
+    /// "needs an external debug probe" note only ever fires for probe-rs off ESP.
+    #[test]
+    fn builtin_debug_and_default_flash_routes_are_grounded() {
+        for v in VARIANTS {
+            for s in v.stacks {
+                assert_eq!(
+                    s.builtin_debug,
+                    s.backend.is_esp(),
+                    "{}/{}: builtin_debug must track the ESP parts", v.id, s.id
+                );
+                // On every stack that lists flashing support, the default is a
+                // no-probe route (never probe-rs).
+                if let Some(def) = s.default_tool(ToolCategory::Flashing) {
+                    assert!(!def.needs_probe, "{}/{}: default flash route needs a probe", v.id, s.id);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2159,14 +2247,23 @@ mod tests {
         }
     }
 
-    /// The flash route is a property of the board's bootloader (or, on esp-hal,
-    /// of the user's flashing choice) — pinned here against
-    /// `scripts/matrix.sh`, which is the script that actually flashed these
-    /// boards over USB with no SWD probe.
+    /// The flash route is a property of the user's flashing choice on every stack
+    /// except esp-idf (whose template fixes it). The DEFAULT route for each stack
+    /// is pinned here against `scripts/matrix.sh`, which is the script that
+    /// actually flashed these boards over USB with no SWD probe.
     #[test]
     fn flash_routes_match_the_verified_usb_routes() {
-        let route = |chip: &str, stack: &str| {
-            variant(chip).unwrap().stack(stack).unwrap().flash_prereqs
+        // The default flash route = the prereqs of the stack's default (no-probe)
+        // flashing tool. FLASHING is a live user choice everywhere but esp-idf, so
+        // `flash_prereqs` is empty and the route follows the chosen ToolChoice.
+        let default_route = |chip: &str, stack: &str| {
+            variant(chip)
+                .unwrap()
+                .stack(stack)
+                .unwrap()
+                .default_tool(ToolCategory::Flashing)
+                .unwrap()
+                .prereqs
         };
         // RP2040/RP2350: picotool reads the ELF directly (BOOTSEL mass storage).
         for (chip, stacks) in [
@@ -2174,7 +2271,7 @@ mod tests {
             ("xiao-rp2350", ["rp235x-hal", "embassy-rp"]),
         ] {
             for s in stacks {
-                assert_eq!(route(chip, s), &["picotool"], "{chip}/{s}");
+                assert_eq!(default_route(chip, s), &["picotool"], "{chip}/{s}");
             }
         }
         // nRF52840: ELF -> raw bin (rust-objcopy) -> UF2 (uf2conv.py).
@@ -2183,24 +2280,39 @@ mod tests {
             ("xiao-nrf52840-sense", ["nrf-hal", "embassy-nrf"]),
         ] {
             for s in stacks {
-                assert_eq!(route(chip, s), &["rust-objcopy", "uf2conv"], "{chip}/{s}");
+                assert_eq!(default_route(chip, s), &["rust-objcopy", "uf2conv"], "{chip}/{s}");
             }
         }
         // SAMD21: hf2 takes the ELF directly over HID.
-        assert_eq!(route("xiao-samd21", "atsamd-hal"), &["hf2"]);
+        assert_eq!(default_route("xiao-samd21", "atsamd-hal"), &["hf2"]);
         // esp-idf: the template's cargo runner is espflash, and FLASHING is not a
-        // live axis there, so it is stack data.
-        assert_eq!(route("xiao-esp32c3", "esp-idf"), &["espflash"]);
-        // esp-hal: empty — the chosen flashing tool decides (see the model test).
-        assert!(route("xiao-esp32c3", "esp-hal").is_empty());
-        // Every non-ESP route is USB/UF2: no probe-rs, because there is no SWD probe.
+        // live axis there, so it is fixed stack data.
+        assert_eq!(
+            variant("xiao-esp32c3").unwrap().stack("esp-idf").unwrap().flash_prereqs,
+            &["espflash"]
+        );
+        // Every stack but esp-idf leaves `flash_prereqs` empty — the chosen
+        // flashing tool decides (see the model test).
+        for v in VARIANTS {
+            for s in v.stacks {
+                if s.id == "esp-idf" {
+                    continue;
+                }
+                assert!(
+                    s.flash_prereqs.is_empty(),
+                    "{}/{}: FLASHING is live here, so flash_prereqs must be empty", v.id, s.id
+                );
+            }
+        }
+        // Every non-ESP DEFAULT route is USB/UF2: no probe-rs, because there is no
+        // SWD probe out of the box.
         for v in VARIANTS {
             if v.is_esp() {
                 continue;
             }
             for s in v.stacks {
                 assert!(
-                    !s.flash_prereqs.contains(&"probe-rs"),
+                    !s.default_tool(ToolCategory::Flashing).unwrap().prereqs.contains(&"probe-rs"),
                     "{}/{} default flash route must not need a debug probe",
                     v.id, s.id
                 );

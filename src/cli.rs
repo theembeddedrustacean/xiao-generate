@@ -63,13 +63,17 @@ pub struct Cli {
     #[arg(long)]
     pub power_board: bool,
 
-    /// Flashing tool for the esp-hal (no_std) base project: `espflash` (default)
-    /// or `probe-rs`.
+    /// Flashing tool. Each device defaults to its no-probe USB route — espflash
+    /// (ESP), picotool (RP BOOTSEL), or the UF2 bootloader (nRF/SAMD21) — with
+    /// `probe-rs` the external-SWD-debug-probe alternative everywhere. Not
+    /// user-selectable on the esp-idf stack (the template fixes it).
     #[arg(long, value_name = "TOOL")]
     pub flashing: Option<String>,
 
-    /// Logging frontend for the esp-hal (no_std) base project: `none` (default),
-    /// `log`, or `defmt`. `log` is unavailable with `--flashing probe-rs`.
+    /// Logging frontend: `none` (default) or `defmt` on every no_std stack; the
+    /// esp-hal stack additionally offers `log` (esp-println, ESP-only, and
+    /// unavailable with `--flashing probe-rs`). On the Cortex-M boards defmt is
+    /// wired for RTT — viewing its output needs a debug probe.
     #[arg(long, value_name = "FRONTEND")]
     pub logging: Option<String>,
 

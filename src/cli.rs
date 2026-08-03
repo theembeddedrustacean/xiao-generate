@@ -25,8 +25,9 @@ use clap::Parser;
                   working project.\n\n\
                   ESP variants support a no_std esp-hal stack (default) and a std esp-idf stack \
                   (--stack esp-idf / --std).\n\n\
-                  Generated projects carry rust-analyzer editor configuration: VS Code by default, \
-                  or pick another with --editor (--editor none writes no editor files)."
+                  Every generated project ships a project-level rust-analyzer.toml. Editor-specific \
+                  client config is opt-in via --editor (vscode/helix/neovim/zed); the default is \
+                  none, which writes no editor-specific files."
 )]
 pub struct Cli {
     /// XIAO module variant, e.g. `xiao-esp32s3-sense` (see --list-chips).
@@ -93,9 +94,10 @@ pub struct Cli {
     #[arg(long = "add-crate", value_name = "SPEC")]
     pub add_crate: Vec<String>,
 
-    /// Editor to emit rust-analyzer configuration for: `vscode` (default),
-    /// `helix`, `neovim`, `zed`, or `none` for no editor files. Applies to all
-    /// stacks.
+    /// Editor to emit rust-analyzer client config for: `none` (default, no
+    /// editor-specific files), `vscode`, `helix`, `neovim`, or `zed`. Every
+    /// project ships a project-level rust-analyzer.toml regardless. Applies to
+    /// all stacks.
     #[arg(long, value_name = "EDITOR")]
     pub editor: Option<String>,
 

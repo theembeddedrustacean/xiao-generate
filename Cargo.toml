@@ -16,6 +16,8 @@ anyhow = "1.0"
 ratatui = "0.30"
 crossterm = "0.29"
 tempfile = "3"
+rascii_art = "0.4"
+ansi-to-tui = "8"
 
 [dev-dependencies]
 tempfile = "3"

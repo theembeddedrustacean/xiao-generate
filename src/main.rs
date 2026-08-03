@@ -426,7 +426,15 @@ fn print_summary(cfg: &Config) {
     // the noise this feature exists to remove.
     println!("\nNext steps:");
     println!("  cd {}", cfg.out_dir.display());
+    if !cfg.stack.backend.is_esp() {
+        // The non-ESP scaffold pins the target in .cargo/config.toml but cannot
+        // install it for the user.
+        println!("  rustup target add {}", cfg.stack.target);
+    }
     println!("  cargo build");
+    if cfg.variant.arch == registry::Arch::Xtensa {
+        println!("  (ESP32-S3 is Xtensa — needs the `esp` toolchain via espup)");
+    }
     if cfg.stack.is_std() {
         // Deliberately does NOT say "via espup": esp-idf-sys is what fetches and
         // builds the SDK, on RISC-V as well as Xtensa, and espup is only in the

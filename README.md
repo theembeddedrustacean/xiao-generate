@@ -229,10 +229,16 @@ only the missing one is given an install command.
 
 ## Editor support
 
-Generated projects carry rust-analyzer configuration that suppresses the
-spurious `E0463: can't find crate for test` you would otherwise get on a
-bare-metal target. VS Code by default; pick another with `--editor helix`,
-`--editor neovim`, `--editor zed`, or `--editor none` to write no editor files.
+Every generated project ships a project-level `rust-analyzer.toml` that
+suppresses the spurious `E0463: can't find crate for test` you would otherwise
+get on a bare-metal target — this is always written, whatever `--editor` you
+pick.
+
+Editor-specific client config is opt-in. The default is `--editor none`, which
+writes no editor files; pass `--editor vscode`, `helix`, `neovim`, or `zed` to
+also drop that editor's settings into the project (the client config is the part
+actually verified to clear the diagnostic in-editor, as the `.toml` alone does
+not in current rust-analyzer).
 
 ## Licence
 

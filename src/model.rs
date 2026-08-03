@@ -1358,21 +1358,20 @@ mod tests {
     // ---- universal editor support (--editor) ----
 
     #[test]
-    fn editor_defaults_to_vscode_when_the_flag_is_absent() {
-        // THE no-regression guarantee: a user who passes nothing still gets the
-        // VS Code client config, which is the delivery path verified to clear the
-        // spurious `test`-crate diagnostic.
+    fn editor_defaults_to_none_when_the_flag_is_absent() {
+        // Writing into someone's editor config is opt-in: passing nothing writes
+        // no editor files at all. `none` also leads the catalog, so this axis reads
+        // like every other universal option list — do-nothing first and selected.
         let c = Config::resolve(raw("xiao-esp32c3")).unwrap();
-        assert_eq!(c.editor.id, "vscode");
-        assert_eq!(c.editor.path, Some(".vscode/settings.json"));
-        assert!(c.editor.path.is_some());
+        assert_eq!(c.editor.id, "none");
+        assert_eq!(c.editor.path, None, "the default must not emit an editor file");
         // …and the default is catalog index 0, the convention the other catalogs use.
         assert_eq!(registry::default_editor().id, registry::EDITORS[0].id);
     }
 
     #[test]
     fn editor_default_is_backend_independent() {
-        // The diagnostic is identical on all three backends, so the default must
+        // Editor choice has nothing to do with the backend, so the default must
         // not vary by stack — every one of them gets the same editor.
         for (chip, stack) in [
             ("xiao-esp32c3", None),
@@ -1384,7 +1383,7 @@ mod tests {
             let mut r = raw(chip);
             r.stack = stack.map(|s| s.to_string());
             let c = Config::resolve(r).unwrap_or_else(|e| panic!("{chip}/{stack:?}: {e}"));
-            assert_eq!(c.editor.id, "vscode", "{chip}/{stack:?} must get the same default");
+            assert_eq!(c.editor.id, "none", "{chip}/{stack:?} must get the same default");
         }
     }
 
@@ -1437,7 +1436,7 @@ mod tests {
         // …and passing the default explicitly round-trips to the same terse form.
         let cmd = cmd_for(|r| {
             r.chip = "xiao-esp32c6".to_string();
-            r.editor = Some("vscode".to_string());
+            r.editor = Some("none".to_string());
         });
         assert_eq!(cmd, "xiao-generate --chip xiao-esp32c6");
     }

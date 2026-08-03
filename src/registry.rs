@@ -532,6 +532,12 @@ pub struct Editor {
 /// own documentation and is pinned by a unit test in `templates`.
 pub const EDITORS: &[Editor] = &[
     Editor {
+        id: "none",
+        display: "none",
+        path: None,
+        caveat: None,
+    },
+    Editor {
         id: "vscode",
         display: "VS Code",
         path: Some(".vscode/settings.json"),
@@ -560,12 +566,6 @@ pub const EDITORS: &[Editor] = &[
         // opt-in instead of pretending the file is self-executing.
         caveat: Some("needs `vim.o.exrc = true` + `:trust` (Neovim has no automatic project-local config)"),
     },
-    Editor {
-        id: "none",
-        display: "none",
-        path: None,
-        caveat: None,
-    },
 ];
 
 /// Resolve an editor id.
@@ -573,7 +573,11 @@ pub fn editor(id: &str) -> Option<&'static Editor> {
     EDITORS.iter().find(|e| e.id == id)
 }
 
-/// The editor used when `--editor` is not given: catalog index 0 (VS Code).
+/// The editor used when `--editor` is not given: catalog index 0.
+///
+/// That is `none` — writing editor files is opt-in, and `none` leads the catalog
+/// so it reads the same way as every other universal option list, where the
+/// do-nothing choice is first and selected until the user picks otherwise.
 pub fn default_editor() -> &'static Editor {
     &EDITORS[0]
 }

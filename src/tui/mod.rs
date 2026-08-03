@@ -52,6 +52,8 @@ use ratatui::{DefaultTerminal, Frame};
 use crate::model::{self, Config, RawConfig, Readiness};
 use crate::registry::{self, Stack, ToolCategory, Variant};
 
+mod ferris;
+
 /// What an interactive session produced.
 pub enum Outcome {
     /// User quit without confirming.
@@ -232,7 +234,7 @@ impl App {
                 .unwrap_or(0),
             uferris_on: false,
             power_board_on: false,
-            async_on: true,
+            async_on: false,
             name,
             focus: Row::Device,
             dark: true,
@@ -411,7 +413,7 @@ impl App {
         self.stack_idx = 0;
         self.uferris_on = false;
         self.power_board_on = false;
-        self.async_on = true;
+        self.async_on = false;
         self.reset_cats();
         self.normalize_cats();
         self.ensure_focus_valid();
@@ -441,7 +443,9 @@ impl App {
     fn toggle_uferris(&mut self) {
         self.uferris_on = !self.uferris_on;
         if self.uferris_on {
-            self.async_on = true;
+            // Nothing under BSP SUPPORT is pre-selected: enabling µFerris does
+            // not silently turn async on. The async row shows its own gap hint
+            // while it is off, so the consequence is visible rather than assumed.
         } else {
             self.power_board_on = false;
             // µFerris off: the toolchain sections become a live, editable axis
@@ -573,178 +577,6 @@ fn cycle(idx: usize, delta: isize, len: usize) -> usize {
 // Rendering (pure over (&App, &Theme) — exercised headlessly by the tests below).
 // ---------------------------------------------------------------------------
 
-/// Ferris (the Rust crab) — the Summary panel's centrepiece, rendered as COLORED
-/// QUADRANT-block terminal art. This is "V4-B": a 36×11 grid produced from the
-/// official CC0 logo (rustacean.net, `flat-happy`) and embedded here VERBATIM. Unlike
-/// the earlier half-block art, every cell carries its OWN glyph — one of the quadrant
-/// blocks (U+2596..U+259F plus `▀▄▌▐█` and space), packing 2×2 subpixels per cell —
-/// so the renderer draws `FERRIS_GLYPH[r][c]` rather than a fixed `▀`/`▄`.
-/// Three parallel tables describe each cell:
-///   `FERRIS_GLYPH` the character to draw
-///   `FERRIS_FG`    the glyph ink   (`t` in the source data)
-///   `FERRIS_BG`    the cell behind (`b` in the source data)
-/// Colour codes: `.` transparent (the themed panel background shows through),
-/// `o` body orange, `d` dark-red shading, `k` black (eyes/smile), `w` white (glints).
-/// The block's LEADING blanks are significant, so it is centred as a unit with a
-/// uniform left-pad and never re-padded per line.
-///
-/// FACE ALIGNMENT: the shell, claws and legs are EXACTLY mirror-symmetric about the
-/// block's vertical axis (subpixel column 35.5 of the 72×22 expansion). The face rows
-/// (5..=8) originally sat one whole cell to the RIGHT of that axis — the eyes' and
-/// mouth's ink measured a uniform +2.0-subpixel centroid offset while every other row
-/// measured 0 — which read as a visibly off-centre face. Rows 5..=8 therefore carry the
-/// face block shifted one cell left, so all four face rows now centre on the crab's own
-/// axis; the vacated cells were plain shell (`█`/`▀` in `o`/`d`) and are refilled as
-/// such, so no art is lost. `ferris_face_is_centred_on_the_crab_axis` pins this.
-///
-/// Drawn ONLY when the panel interior
-/// can hold it (≥ `FERRIS_W` wide AND ≥ `FERRIS_H` spare rows below the summary text —
-/// see `draw_summary`); on a narrow/short panel it is omitted entirely rather than
-/// wrapped or clipped.
-const FERRIS_W: usize = 36;
-const FERRIS_H: usize = 11;
-
-/// Per-cell glyphs, from the V4-B data (face rows 5..=8 re-centred — see above).
-const FERRIS_GLYPH: [&str; FERRIS_H] = [
-    "            ▀▖▘█▀██▀█▝▗▀            ",
-    "          ▝▀████████████▀▘          ",
-    "▘▖▌█▀   ▝▀████████████████▀▘   ▀█▐▗▝",
-    "██▘██▐▗▘████████████████████▝▖▌██▝██",
-    "▌████▘▘██████████████████████▝▝████▐",
-    " ▝▖█▝▖████████▀▖▖██▀▖▖████████▗▘█▗▘ ",
-    "    ▖█████████▄▘███▄▘██████████▗    ",
-    "   ▌█▗▀▀▀█████▝▄▘██▝▄▘█████▀▀▀▖█▐   ",
-    "   ▝█▝▄▖▄▄▄▝▀▀▀▀▝▀▚▀▀▀▀▀▘▄▄▄▗▄▘█▘   ",
-    "    ▝█▖▖                    ▗▗█▘    ",
-    "      ▖                      ▗      ",
-];
-
-/// Per-cell glyph-ink colour codes, matching `FERRIS_GLYPH` cell for cell.
-const FERRIS_FG: [&str; FERRIS_H] = [
-    ".............o.o.oo.o.o.............",
-    "............oooooooooooo............",
-    ".o.o......oooooooooooooooo......o.o.",
-    "oo.oo.o.oooooooooooooooooooo.o.oo.oo",
-    ".ooooo.oooooooooooooooooooooo.ooooo.",
-    ".o.o..ooooooooowkooowkoooooooo..o.o.",
-    ".....oooooooookwkookwkooooooooo.....",
-    "....odooooooookokookokoooooooodo....",
-    "...oo..d..ooooookodooooooo..d..oo...",
-    "....ooo......................ooo....",
-    "....................................",
-];
-
-/// Per-cell background colour codes, matching `FERRIS_GLYPH` cell for cell.
-const FERRIS_BG: [&str; FERRIS_H] = [
-    "............o.o.o..o.o.o............",
-    "..........oo............oo..........",
-    "o.o.o...oo................oo...o.o.o",
-    "..o..o.o....................o.o..o..",
-    "o.....o......................o.....o",
-    "..o.oo........wko..wko........oo.o..",
-    "....o.........wk...wk..........o....",
-    "...o.oddd.....oko..oko.....dddo.o...",
-    ".....od.dddddddddkkddddddddd.do.....",
-    ".......o....................o.......",
-    "......o......................o......",
-];
-
-/// The crab's four inks — FIXED truecolor in BOTH themes. Unlike every other widget
-/// they do NOT follow `theme.accent` (salmon in dark, blue in light); pinning them
-/// keeps the mascot's identity stable across a `t` theme toggle. Only the empty
-/// space around/inside the crab (transparent cells) tracks the theme.
-const FERRIS_ORANGE: Color = Color::Rgb(247, 76, 0);
-const FERRIS_DARK: Color = Color::Rgb(163, 40, 0);
-const FERRIS_BLACK: Color = Color::Rgb(0, 0, 0);
-const FERRIS_WHITE: Color = Color::Rgb(255, 255, 255);
-
-/// Ink for a colour code, or `None` for transparent (`.`).
-fn ferris_ink(code: u8) -> Option<Color> {
-    match code {
-        b'o' => Some(FERRIS_ORANGE),
-        b'd' => Some(FERRIS_DARK),
-        b'k' => Some(FERRIS_BLACK),
-        b'w' => Some(FERRIS_WHITE),
-        _ => None,
-    }
-}
-
-/// The quadrant-block glyph covering exactly the subpixels `g` does NOT cover.
-/// Used to express a cell whose GLYPH INK is transparent but whose BACKGROUND is
-/// coloured: painting `complement(g)` in that colour leaves the glyph's own
-/// subpixels untouched, which is visually identical to an unset background but keeps
-/// the crab theme-independent (an unset foreground would inherit `theme.fg` and paint
-/// a stray themed smudge). Space and `█` are each other's complement.
-fn ferris_complement(g: char) -> char {
-    match g {
-        ' ' => '█',
-        '█' => ' ',
-        '▀' => '▄',
-        '▄' => '▀',
-        '▌' => '▐',
-        '▐' => '▌',
-        '▘' => '▟',
-        '▟' => '▘',
-        '▝' => '▙',
-        '▙' => '▝',
-        '▖' => '▜',
-        '▜' => '▖',
-        '▗' => '▛',
-        '▛' => '▗',
-        '▚' => '▞',
-        '▞' => '▚',
-        other => other,
-    }
-}
-
-/// One cell's glyph + style. The cell's own glyph is drawn with `fg` = its ink and
-/// `bg` = its background; a transparent background is left UNSET so the themed panel
-/// shows through. A transparent ink over a coloured background is drawn as the
-/// complement glyph in that colour (see `ferris_complement`), and a fully transparent
-/// cell is a plain space with no background at all.
-fn ferris_cell(glyph: char, ink: Option<Color>, back: Option<Color>) -> (char, Style) {
-    match (ink, back) {
-        (None, None) => (' ', Style::default()),
-        (Some(f), Some(b)) => (glyph, Style::default().fg(f).bg(b)),
-        (Some(f), None) => (glyph, Style::default().fg(f)),
-        (None, Some(b)) => (ferris_complement(glyph), Style::default().fg(b)),
-    }
-}
-
-/// The crab as `FERRIS_H` styled `Line`s, each prefixed with `left_pad` spaces so the
-/// block is centred as a unit. Consecutive cells that share a style are merged into a
-/// single span so a row is a handful of spans rather than 36.
-fn ferris_lines(left_pad: usize) -> Vec<Line<'static>> {
-    let pad = " ".repeat(left_pad);
-    let mut out = Vec::with_capacity(FERRIS_H);
-    for r in 0..FERRIS_H {
-        let ink = FERRIS_FG[r].as_bytes();
-        let back = FERRIS_BG[r].as_bytes();
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        if !pad.is_empty() {
-            spans.push(Span::raw(pad.clone()));
-        }
-        let mut run = String::new();
-        let mut run_style: Option<Style> = None;
-        for (c, g) in FERRIS_GLYPH[r].chars().enumerate() {
-            let (glyph, style) = ferris_cell(g, ferris_ink(ink[c]), ferris_ink(back[c]));
-            if run_style == Some(style) {
-                run.push(glyph);
-            } else {
-                if let Some(s) = run_style.take() {
-                    spans.push(Span::styled(std::mem::take(&mut run), s));
-                }
-                run.push(glyph);
-                run_style = Some(style);
-            }
-        }
-        if let Some(s) = run_style {
-            spans.push(Span::styled(run, s));
-        }
-        out.push(Line::from(spans));
-    }
-    out
-}
 
 /// Exact rendered height (rows) of `lines` laid out at `width` with the same
 /// word-wrap the Summary panel uses. Rendered headlessly into a scratch buffer so
@@ -1121,10 +953,6 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         "async (embassy)",
         async_hint,
     ));
-    lines.push(Line::styled(
-        "    · µFerris template selection is planned for a later version",
-        theme.hint_style(),
-    ));
 
     let form = Paragraph::new(lines).style(theme.base()).block(
         Block::default()
@@ -1160,8 +988,10 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             };
             lines.push(row("Name:", cfg.project_name.clone()));
             lines.push(row("Device:", format!("{} ({})", cfg.variant.display, cfg.variant.id)));
-            lines.push(row("Stack:", cfg.stack.id.to_string()));
-            lines.push(row("  ", cfg.stack.display.to_string()));
+            // One line, not two: `display` already opens with the stack id
+            // ("esp-hal · no_std"), so printing `id` above it just said the name
+            // twice.
+            lines.push(row("Stack:", cfg.stack.display.to_string()));
             lines.push(row("Target:", cfg.stack.target.to_string()));
 
             // Universal toolchain — only on the live esp-hal base axis.
@@ -1222,24 +1052,37 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
     }
 
-    // Ferris, the crab — the Summary panel's centrepiece. Rendered as COLORED half-
-    // block art in fixed (theme-independent) inks, centred horizontally as a
-    // FERRIS_W-wide block (uniform left-pad, so the shape never breaks) and centred
-    // vertically in the leftover rows BELOW the summary content. Drawn only when it
-    // actually fits: interior width ≥ FERRIS_W AND ≥ FERRIS_H spare rows under the
-    // text. Otherwise omitted entirely — a narrow/short panel degrades to "no crab",
-    // never a wrapped or clipped shell.
+    // Ferris, the crab — the Summary panel's centrepiece, rendered from the logo
+    // by RASCII (see `ferris`) at one fixed size, centred horizontally as a block.
+    //
+    // It is ANCHORED to the bottom of the panel, a fixed `FERRIS_BOTTOM_MARGIN`
+    // rows up, NOT centred in the space below the summary text. Centring made its
+    // row depend on how many lines the summary happened to have, so the crab
+    // visibly jumped up and down as options changed the text above it. Anchoring
+    // to the bottom pins its absolute row for a given panel size — the summary
+    // text can grow or shrink and the crab stays put. A fixed gap is left below it
+    // so it sits low without touching the border.
+    //
+    // Drawn only when there is room for the whole crab plus that gap AND at least
+    // `FERRIS_MIN_GAP` blank rows between it and the text; otherwise omitted
+    // entirely (never wrapped or clipped) via `ferris::lines` returning None.
+    const FERRIS_BOTTOM_MARGIN: u16 = 1;
+    const FERRIS_MIN_GAP: u16 = 1;
     let interior_w = area.width.saturating_sub(2);
     let interior_h = area.height.saturating_sub(2);
     let content_h = wrapped_height(&lines, interior_w);
-    let leftover = interior_h.saturating_sub(content_h) as usize;
-    if interior_w as usize >= FERRIS_W && leftover >= FERRIS_H {
-        let left_pad = (interior_w as usize - FERRIS_W) / 2;
-        let top_pad = (leftover - FERRIS_H) / 2;
+    let below = interior_h.saturating_sub(content_h);
+    let art_budget = below.saturating_sub(FERRIS_BOTTOM_MARGIN + FERRIS_MIN_GAP);
+    if let Some(art) = ferris::lines(interior_w, art_budget) {
+        // Absolute top row of the crab = interior_h - art_h - bottom_margin, which
+        // is independent of content_h — that is what stops the drift. Expressed as
+        // padding to append after the text, that is `below - art_h - margin`, and
+        // it is >= FERRIS_MIN_GAP by construction of `art_budget` above.
+        let top_pad = usize::from(below) - art.len() - usize::from(FERRIS_BOTTOM_MARGIN);
         for _ in 0..top_pad {
             lines.push(Line::from(""));
         }
-        lines.extend(ferris_lines(left_pad));
+        lines.extend(art);
     }
 
     let p = Paragraph::new(lines).wrap(Wrap { trim: false }).style(theme.base()).block(
@@ -1337,7 +1180,10 @@ mod tests {
     /// Interior (inside-the-borders) width/height of the Summary panel for a page
     /// of size `w`×`h` — replicates `draw`'s layout split so tests can compute the
     /// crab's expected left-pad without hardcoding the percentage geometry.
-    fn summary_interior(w: u16, h: u16) -> (u16, u16) {
+    /// The Summary panel's whole rect (borders included), replicating `draw`'s
+    /// layout split so tests can locate the panel without hardcoding geometry.
+    /// The interior is this inset by one cell on every side.
+    fn summary_interior_rect(w: u16, h: u16) -> Rect {
         let area = Rect::new(0, 0, w, h);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -1347,7 +1193,12 @@ mod tests {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .split(chunks[1]);
-        (cols[1].width.saturating_sub(2), cols[1].height.saturating_sub(2))
+        cols[1]
+    }
+
+    fn summary_interior(w: u16, h: u16) -> (u16, u16) {
+        let r = summary_interior_rect(w, h);
+        (r.width.saturating_sub(2), r.height.saturating_sub(2))
     }
 
     fn app_on(variant_id: &str, stack_idx: usize) -> App {
@@ -1383,7 +1234,6 @@ mod tests {
             "Enable µFerris BSP",
             "power board",
             "async",
-            "template selection is planned",
             "Summary",
         ] {
             assert!(s.contains(needle), "single page must show `{needle}`:\n{s}");
@@ -1621,17 +1471,36 @@ mod tests {
         );
     }
 
+    /// Enabling µFerris makes the power-board and async rows live, but selects
+    /// NOTHING for the user — async stays off until they choose it, and the row
+    /// says so via its gap hint rather than quietly defaulting to a value.
     #[test]
-    fn uferris_enabled_shows_power_async_live_and_the_note() {
+    fn uferris_enabled_makes_power_and_async_live_without_selecting_them() {
         let mut app = app_on("xiao-esp32c3", 0);
         app.uferris_on = true;
         app.ensure_focus_valid();
         let s = render(&app, W, H);
         assert!(s.contains("[x] Enable µFerris BSP"), "µFerris on:\n{s}");
         assert!(s.contains("Megalops"), "power board hint live when µFerris on:\n{s}");
-        assert!(s.contains("[x] async (embassy)"), "async on by default under µFerris:\n{s}");
+        assert!(
+            s.contains("[ ] async (embassy)"),
+            "async must NOT be pre-selected under µFerris:\n{s}"
+        );
+
+        // Consequence of nothing being pre-selected: µFerris on its own is not yet
+        // a generatable config, because the only verified µFerris body is the async
+        // one. The summary must say so rather than offer a command that would fail
+        // (`uferris_async_off_is_refused_in_summary` pins the wording).
+        assert!(
+            !flat(&s).contains("--uferris"),
+            "µFerris without async is a gap — no equivalent command should be offered:\n{s}"
+        );
+
+        // Once the user picks async themselves, it becomes a real config.
+        app.async_on = true;
+        let s = render(&app, W, H);
+        assert!(s.contains("[x] async (embassy)"), "async on after the user selects it:\n{s}");
         assert!(s.contains("embassy (verified)"), "async hint live:\n{s}");
-        assert!(s.contains("template selection is planned for a later version"), "note shown:\n{s}");
         assert!(flat(&s).contains("--uferris"), "equivalent command carries --uferris:\n{s}");
     }
 
@@ -1653,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_section_renders_the_whole_catalog_with_vscode_preselected() {
+    fn editor_section_renders_the_whole_catalog_with_none_preselected() {
         let s = render(&app_on("xiao-esp32c6", 0), W, H);
         assert!(s.contains("EDITOR SUPPORT"), "section heading present:\n{s}");
         for e in registry::EDITORS {
@@ -1661,7 +1530,8 @@ mod tests {
         }
         // A radio list, styled exactly like the toolchain sections: the registry
         // default is selected, everything else (including `none`) is an open slot.
-        assert!(s.contains("(•) VS Code"), "VS Code selected by default:\n{s}");
+        assert!(s.contains("(•) none"), "none selected by default:\n{s}");
+        assert!(s.contains("( ) VS Code"), "VS Code offered, unselected:\n{s}");
         assert!(s.contains("( ) Helix"), "Helix offered, unselected:\n{s}");
         assert!(s.contains("( ) Zed"), "Zed offered, unselected:\n{s}");
         assert!(s.contains("( ) Neovim"), "Neovim offered, unselected:\n{s}");
@@ -1695,6 +1565,10 @@ mod tests {
 
         // µFerris takes over the toolchain sections, but not the user's editor.
         let mut uf = app_on("xiao-esp32c3", 0);
+        // Pick an editor FIRST, so this proves a real user choice survives rather
+        // than just observing the default sit there.
+        uf.focus = Row::Editor(ed_pos("vscode"));
+        uf.activate();
         uf.uferris_on = true;
         uf.ensure_focus_valid();
         assert!(
@@ -1708,32 +1582,36 @@ mod tests {
     fn selecting_an_editor_updates_the_config_and_the_equivalent_command() {
         let mut app = app_on("xiao-esp32c6", 0);
 
-        // Single-select: choosing Helix REPLACES the default VS Code.
+        // Single-select: choosing Helix REPLACES the default `none`.
         app.focus = Row::Editor(ed_pos("helix"));
         app.activate();
         let s = render(&app, W, H);
         assert!(s.contains("(•) Helix"), "Helix selected after activate:\n{s}");
-        assert!(!s.contains("(•) VS Code"), "VS Code must be deselected:\n{s}");
+        // Single-select: the editor axis holds ONE index, so picking Helix
+        // necessarily clears the default. Asserted on the resolved config rather
+        // than by searching for "(•) none" — `none` is also a LOGGING and a
+        // FRAMEWORK entry, so that string cannot tell the sections apart.
         let (cfg, _) = app.resolved().unwrap();
-        assert_eq!(cfg.editor.id, "helix");
+        assert_eq!(cfg.editor.id, "helix", "choosing Helix must replace the default");
         assert!(flat(&s).contains("--editor helix"), "command carries the editor:\n{s}");
         assert!(s.contains("Editor:"), "summary shows the editor row:\n{s}");
         assert!(s.contains("Helix"), "summary lists the choice:\n{s}");
 
-        // `none` is a normal choice on the same list.
+        // VS Code is now a NON-default choice, so it must show up in the command.
+        app.focus = Row::Editor(ed_pos("vscode"));
+        app.activate();
+        let (cfg, _) = app.resolved().unwrap();
+        assert_eq!(cfg.editor.id, "vscode");
+        assert_eq!(cfg.editor.path, Some(".vscode/settings.json"));
+        let s = render(&app, W, H);
+        assert!(flat(&s).contains("--editor vscode"), "command carries --editor vscode:\n{s}");
+
+        // …and back to `none`, which IS the default, so the flag drops off again.
         app.focus = Row::Editor(ed_pos("none"));
         app.activate();
         let (cfg, _) = app.resolved().unwrap();
         assert_eq!(cfg.editor.id, "none");
         assert!(cfg.editor.path.is_none(), "`none` writes nothing");
-        let s = render(&app, W, H);
-        assert!(s.contains("(•) none"), "none selectable on the editor list:\n{s}");
-        assert!(flat(&s).contains("--editor none"), "command carries --editor none:\n{s}");
-
-        // …and back to the default, which drops the flag again.
-        app.focus = Row::Editor(ed_pos("vscode"));
-        app.activate();
-        let (cfg, _) = app.resolved().unwrap();
         assert_eq!(model::equivalent_command(&cfg), "xiao-generate --chip xiao-esp32c6");
     }
 
@@ -1793,7 +1671,14 @@ mod tests {
             "(•) defmt",
             "(•) embassy",
         ] {
-            assert!(!on.contains(filled), "no toolchain selection under µFerris (`{filled}`):\n{on}");
+            // Scoped to the sections ABOVE EDITOR SUPPORT: the editor axis stays
+            // live under µFerris and its default renders as `(•) none`, which
+            // would otherwise trip this check.
+            let toolchain = on.split("EDITOR SUPPORT").next().unwrap_or(&on);
+            assert!(
+                !toolchain.contains(filled),
+                "no toolchain selection under µFerris (`{filled}`):\n{on}"
+            );
         }
         assert!(on.contains("( ) espflash"), "flashing entries render empty under µFerris:\n{on}");
         // The sections are not in the focusable set while µFerris is on.
@@ -1820,11 +1705,12 @@ mod tests {
     /// (U+2596..U+259F) plus `▀▄▌▐█`. None of them occur anywhere in the form/summary
     /// text or panel borders, so any cell carrying one is unambiguously part of the
     /// crab. A blank crab cell paints a plain space and is (correctly) not counted.
+    /// The glyphs RASCII's `block` charset can paint the crab with. Shading
+    /// characters, not the quadrant set: RASCII picks one per cell by luminance,
+    /// and on flat vector art nearly every cell lands on `░` — the picture is
+    /// carried by each cell's colour, not by glyph variety.
     fn is_crab_glyph(sym: &str) -> bool {
-        matches!(
-            sym,
-            "▀" | "▄" | "▌" | "▐" | "█" | "▖" | "▗" | "▘" | "▙" | "▚" | "▛" | "▜" | "▝" | "▞" | "▟"
-        )
+        matches!(sym, "░" | "▒" | "▓" | "█")
     }
 
     /// Every painted crab cell in a rendered buffer, as (x, y, glyph, fg).
@@ -1843,338 +1729,186 @@ mod tests {
         v
     }
 
-    /// Painted-column range [min, max] of the crab art within its FERRIS_W box,
-    /// derived from the embedded data so the centring test never hardcodes it.
-    fn art_col_bounds() -> (usize, usize) {
-        let mut lo = FERRIS_W;
-        let mut hi = 0usize;
-        for r in 0..FERRIS_H {
-            for grid in [FERRIS_FG[r], FERRIS_BG[r]] {
-                for (c, ch) in grid.bytes().enumerate() {
-                    if ch != b'.' {
-                        lo = lo.min(c);
-                        hi = hi.max(c);
-                    }
-                }
-            }
-        }
-        (lo, hi)
-    }
 
     /// Interior left column of the Summary panel (just inside its left border) —
     /// replicates `draw`'s layout split so the crab's centring can be checked.
     fn summary_ix(w: u16, h: u16) -> u16 {
-        let area = Rect::new(0, 0, w, h);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(3)])
-            .split(area);
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(chunks[1]);
-        cols[1].x + 1
+        summary_interior_rect(w, h).x + 1
     }
 
+
+    // -----------------------------------------------------------------------
+    // Ferris, measured on the REAL rendered buffer. The art itself is produced at
+    // runtime by RASCII from the logo (see the `ferris` module, which unit-tests
+    // the fit arithmetic); what matters here is that `draw_summary` places it
+    // correctly and drops it when the panel cannot hold it.
+    // -----------------------------------------------------------------------
+
+    /// Page width whose Summary interior is too narrow to earn a crab, so the
+    /// width guard is exercised rather than assumed.
+    const NARROW_W: u16 = 60;
+
+    /// Page height that leaves too few spare rows under the summary text for any
+    /// crab, exercising the height guard.
+    const SHORT_H: u16 = 26;
+
+    /// A panel with no room must render cleanly with NO crab, rather than a
+    /// clipped or wrapped one. This is the failure the fit guard exists to prevent.
     #[test]
-    fn summary_shows_ferris_art_centered() {
-        // At the tested size the panel is wide+tall enough: the colored crab is
-        // painted, horizontally centred as a FERRIS_W-wide block.
+    fn crab_is_omitted_when_the_panel_cannot_hold_it() {
+        for (w, h, why) in [(NARROW_W, H, "too narrow"), (W, SHORT_H, "too short")] {
+            let buf = render_buf(&app_on("xiao-esp32c6", 0), w, h);
+            assert!(
+                crab_cells(&buf).is_empty(),
+                "a {why} panel ({w}x{h}) still painted crab glyphs"
+            );
+        }
+    }
+
+    /// On a panel with room, the crab is actually painted, sits inside the Summary
+    /// panel, and is horizontally centred there as a block.
+    #[test]
+    fn crab_is_painted_and_centred_in_the_summary_panel() {
+        let (iw, _) = summary_interior(W, H);
+        let ix = summary_ix(W, H);
         let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
         let cells = crab_cells(&buf);
-        assert!(cells.len() > 200, "the colored crab must be painted (got {} cells)", cells.len());
+        assert!(!cells.is_empty(), "no crab painted on a {W}x{H} page");
 
-        // The crab is centred as one FERRIS_W-wide block at a uniform left-pad. Its
-        // painted columns must therefore land at exactly interior_left + left_pad +
-        // (the art's own painted-column offsets) — proving the block is centred, not
-        // left-jammed or off by one.
-        let (iw, _ih) = summary_interior(W, H);
-        let ix = summary_ix(W, H) as usize;
-        let left_pad = (iw as usize - FERRIS_W) / 2;
-        let (art_lo, art_hi) = art_col_bounds();
-        let cmin = cells.iter().map(|c| c.0).min().unwrap() as usize;
-        let cmax = cells.iter().map(|c| c.0).max().unwrap() as usize;
-        assert_eq!(cmin, ix + left_pad + art_lo, "crab painted left edge must be centred");
-        assert_eq!(cmax, ix + left_pad + art_hi, "crab painted right edge must be centred");
-        // And the block's own margins inside the interior are symmetric.
-        let left_gap = cmin - ix;
-        let right_gap = (ix + iw as usize - 1) - cmax;
+        let lo = cells.iter().map(|c| c.0).min().unwrap();
+        let hi = cells.iter().map(|c| c.0).max().unwrap();
+        assert!(lo >= ix, "crab starts at {lo}, left of the Summary interior at {ix}");
         assert!(
-            (left_gap as i32 - right_gap as i32).abs() <= 1,
-            "crab must be horizontally centred (L={left_gap} R={right_gap})"
+            hi < ix + iw,
+            "crab ends at {hi}, past the Summary interior ending at {}",
+            ix + iw
         );
 
-        // Shown in every summary state — including the gated / non-ESP page.
-        let g = crab_cells(&render_buf(&app_on("xiao-rp2040", 0), W, H));
-        assert!(g.len() > 200, "crab shown even on the gated page (got {} cells)", g.len());
+        // Centred as a unit: the slack either side must match within a column
+        // (an odd remainder cannot be split evenly).
+        let left = lo - ix;
+        let right = (ix + iw - 1).saturating_sub(hi);
+        assert!(
+            left.abs_diff(right) <= 1,
+            "crab is off-centre: {left} columns of slack on the left, {right} on the right"
+        );
     }
 
-    // -----------------------------------------------------------------------
-    // Ferris, measured at SUBPIXEL resolution. Every quadrant glyph packs a 2×2
-    // grid of subpixels, so a cell-level comparison cannot see a wrong glyph or a
-    // half-cell displacement. These three tests expand both the art and the real
-    // rendered buffer to that 2× grid and compare there.
-    // -----------------------------------------------------------------------
-
-    /// Every glyph the crab's art — and `ferris_complement`'s substitutions — can
-    /// produce: the quadrant set (U+2596..U+259F), `▀▄▌▐█`, and the blank cell.
-    const BLOCKS: [char; 16] =
-        [' ', '█', '▀', '▄', '▌', '▐', '▘', '▝', '▖', '▗', '▙', '▛', '▜', '▟', '▚', '▞'];
-
-    /// A block glyph's 2×2 subpixel coverage as `[UL, UR, LL, LR]` — the ground truth
-    /// the crab is measured against, written out per glyph rather than derived from
-    /// the code points so a transposed pair cannot cancel itself out.
-    fn coverage(g: char) -> [bool; 4] {
-        match g {
-            ' ' => [false, false, false, false],
-            '█' => [true, true, true, true],
-            '▀' => [true, true, false, false],
-            '▄' => [false, false, true, true],
-            '▌' => [true, false, true, false],
-            '▐' => [false, true, false, true],
-            '▘' => [true, false, false, false],
-            '▝' => [false, true, false, false],
-            '▖' => [false, false, true, false],
-            '▗' => [false, false, false, true],
-            '▙' => [true, false, true, true],
-            '▛' => [true, true, true, false],
-            '▜' => [true, true, false, true],
-            '▟' => [false, true, true, true],
-            '▚' => [true, false, false, true],
-            '▞' => [false, true, true, false],
-            other => panic!("{other:?} is not a block glyph the crab can be painted with"),
-        }
-    }
-
-    /// `Some(ink)` for one of the crab's four fixed inks, `None` for anything else —
-    /// i.e. the themed panel showing through. The crab never paints a theme colour, so
-    /// this cleanly separates "crab" from "background" in a rendered cell.
-    fn crab_ink(c: Color) -> Option<Color> {
-        (c == FERRIS_ORANGE || c == FERRIS_DARK || c == FERRIS_BLACK || c == FERRIS_WHITE)
-            .then_some(c)
-    }
-
-    /// The art expanded to its `FERRIS_W*2` × `FERRIS_H*2` subpixel grid: for each
-    /// cell the glyph decides, quadrant by quadrant, whether that subpixel shows the
-    /// ink (`FERRIS_FG`) or the background (`FERRIS_BG`).
-    fn art_subpixels() -> Vec<Vec<Option<Color>>> {
-        let mut grid = vec![vec![None; FERRIS_W * 2]; FERRIS_H * 2];
-        for r in 0..FERRIS_H {
-            let fg = FERRIS_FG[r].as_bytes();
-            let bg = FERRIS_BG[r].as_bytes();
-            for (c, ch) in FERRIS_GLYPH[r].chars().enumerate() {
-                let (ink, back) = (ferris_ink(fg[c]), ferris_ink(bg[c]));
-                for (q, on) in coverage(ch).iter().enumerate() {
-                    grid[r * 2 + q / 2][c * 2 + q % 2] = if *on { ink } else { back };
-                }
-            }
-        }
-        grid
-    }
-
-    /// Subpixel columns on row `y` carrying FACE ink — black pupils or white glints.
-    /// Shell, claws and legs use only orange and dark red, so these are exactly the
-    /// crab's eye and mouth subpixels.
-    fn face_cols(grid: &[Vec<Option<Color>>], y: usize) -> Vec<usize> {
-        grid[y]
-            .iter()
-            .enumerate()
-            .filter(|&(_, p)| matches!(p, Some(c) if *c == FERRIS_BLACK || *c == FERRIS_WHITE))
-            .map(|(x, _)| x)
-            .collect()
-    }
-
-    /// `ferris_complement` must cover EXACTLY the subpixels its argument does not.
-    /// The quadrant complements are easy to get wrong (`▘`↔`▟`, `▖`↔`▜`, `▝`↔`▙`,
-    /// `▗`↔`▛`), and a single bad pair silently misplaces every transparent-ink cell
-    /// in the crab — so check all four quadrants of all sixteen glyphs.
+    /// The crab must NOT move vertically when the summary text above it changes
+    /// length. This is the drift the anchor-to-bottom placement fixes: it used to
+    /// be centred in the space below the text, so its row tracked the text height
+    /// and it visibly jumped as options were toggled.
+    ///
+    /// Two configs with genuinely different summary lengths must paint the crab's
+    /// top edge on the same row. An ESP variant (universal toolchain sections +
+    /// µFerris line) and an RP2040 variant (neither) differ by several rows, so
+    /// the equality below is a real invariant, not a coincidence — the content
+    /// bottoms are asserted different to prove that.
     #[test]
-    fn ferris_complement_is_the_exact_inverse_of_every_block_glyph() {
-        for g in BLOCKS {
-            let comp = ferris_complement(g);
-            let (a, b) = (coverage(g), coverage(comp));
-            for q in 0..4 {
-                assert_ne!(
-                    a[q], b[q],
-                    "complement({g:?}) = {comp:?}, but quadrant {q} is {} in both — \
-                     they are not complements",
-                    if a[q] { "set" } else { "clear" }
-                );
-            }
-            assert_eq!(ferris_complement(comp), g, "complement({g:?}) must be an involution");
-        }
-    }
-
-    /// The crab the terminal actually shows must equal the art subpixel for subpixel.
-    /// Expands every cell of the REAL rendered buffer through its own glyph (including
-    /// the complement substitutions) and diffs it against `art_subpixels`; anything
-    /// but zero means the renderer is not painting what the tables say.
-    #[test]
-    fn ferris_render_is_subpixel_exact() {
-        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
-        let (iw, _) = summary_interior(W, H);
-        let x0 = summary_ix(W, H) as usize + (iw as usize - FERRIS_W) / 2;
-        let y0 = crab_cells(&buf).iter().map(|c| c.1).min().unwrap() as usize;
-
-        let want = art_subpixels();
-        let mut bad: Vec<(usize, usize, Option<Color>, Option<Color>)> = Vec::new();
-        for r in 0..FERRIS_H {
-            for c in 0..FERRIS_W {
-                let cell = buf
-                    .cell(((x0 + c) as u16, (y0 + r) as u16))
-                    .expect("the whole crab box lies inside the rendered buffer");
-                let mut chars = cell.symbol().chars();
-                let g = chars.next().unwrap_or(' ');
-                assert!(chars.next().is_none(), "crab cell ({c},{r}) must be one glyph wide");
-                for (q, on) in coverage(g).iter().enumerate() {
-                    let got = crab_ink(if *on { cell.fg } else { cell.bg });
-                    let (sx, sy) = (c * 2 + q % 2, r * 2 + q / 2);
-                    if got != want[sy][sx] {
-                        bad.push((sx, sy, want[sy][sx], got));
+    fn crab_does_not_drift_when_the_summary_length_changes() {
+        // Top row of the crab, and the last row carrying summary *text*, both
+        // confined to the Summary panel INTERIOR — the scan must exclude the
+        // full-width bottom status bar, or every config reports text on the last
+        // page row and the precondition can never hold.
+        let probe = |app: &App| -> (u16, u16) {
+            let rect = summary_interior_rect(W, H);
+            let (ix, iy) = (rect.x + 1, rect.y + 1);
+            let (iw, ih) = (rect.width - 2, rect.height - 2);
+            let buf = render_buf(app, W, H);
+            let crab_top = crab_cells(&buf).iter().map(|c| c.1).min();
+            let mut text_bottom = iy;
+            for y in iy..iy + ih {
+                for x in ix..ix + iw {
+                    if let Some(cell) = buf.cell((x, y)) {
+                        let s = cell.symbol();
+                        if !s.trim().is_empty() && !is_crab_glyph(s) {
+                            text_bottom = y;
+                        }
                     }
                 }
             }
-        }
-        assert!(
-            bad.is_empty(),
-            "{} rendered subpixel(s) differ from the art; first few (x, y, want, got): {:?}",
-            bad.len(),
-            &bad[..bad.len().min(6)]
+            (crab_top.expect("a crab must be painted at 140x44"), text_bottom)
+        };
+
+        // esp-hal (shows FLASHING/LOGGING/FRAMEWORK in the summary) vs esp-idf
+        // (option groups do not apply, so those lines are absent) — a several-row
+        // difference in summary length.
+        let (esp_crab, esp_text) = probe(&app_on("xiao-esp32c6", 0));
+        let (rp_crab, rp_text) = probe(&app_on("xiao-esp32c6", 1));
+
+        assert_ne!(
+            esp_text, rp_text,
+            "precondition: the two summaries must differ in length for this test to mean anything"
+        );
+        assert_eq!(
+            esp_crab, rp_crab,
+            "crab drifted: top row {esp_crab} on ESP vs {rp_crab} on RP2040 — it must be \
+             anchored to the panel, not to the summary text"
         );
     }
 
-    /// The crab's face must sit on the crab's own axis of symmetry.
+    /// The crab must look identical in both themes.
     ///
-    /// The regression this pins: the shell, claws and legs are exactly mirror-symmetric,
-    /// but the face rows once sat one whole character cell to the RIGHT of that axis —
-    /// every eye row's ink measured a +2.0-subpixel centroid offset and the eye pair's
-    /// bounding box missed its mirror by 4 subpixels, which reads as a visibly
-    /// off-centre face.
+    /// Its inks come from the logo's own pixels rather than the palette, so this
+    /// is a property of rendering from the image — but it was an explicit
+    /// requirement, and a future "theme the art" change would silently break it.
     #[test]
-    fn ferris_face_is_centred_on_the_crab_axis() {
-        let grid = art_subpixels();
-        let w = FERRIS_W * 2;
-        let axis = (w - 1) as f64 / 2.0;
+    fn crab_colour_does_not_follow_the_theme() {
+        let mut dark = app_on("xiao-esp32c6", 0);
+        dark.dark = true;
+        let mut light = app_on("xiao-esp32c6", 0);
+        light.dark = false;
 
-        // (1) Body integrity: every row WITHOUT face ink is exactly mirror-symmetric,
-        // which is what makes `axis` the crab's real axis rather than an assumption.
-        let mut body_rows = 0;
-        for y in 0..FERRIS_H * 2 {
-            if !face_cols(&grid, y).is_empty() {
-                continue;
-            }
-            body_rows += 1;
-            for x in 0..w {
-                assert_eq!(
-                    grid[y][x],
-                    grid[y][w - 1 - x],
-                    "body subpixel ({x},{y}) does not mirror onto ({},{y})",
-                    w - 1 - x
-                );
-            }
-        }
-        assert_eq!(body_rows, 15, "15 of the 22 subpixel rows are pure body");
-
-        // (2) Each row of face ink is centred on that axis. A run of odd width cannot
-        // straddle an even-width grid exactly, so half a subpixel is the arithmetic
-        // floor — anything beyond it is a real displacement.
-        let mut face_rows = 0;
-        for y in 0..FERRIS_H * 2 {
-            let cols = face_cols(&grid, y);
-            if cols.is_empty() {
-                continue;
-            }
-            face_rows += 1;
-            let centroid = cols.iter().sum::<usize>() as f64 / cols.len() as f64;
-            assert!(
-                (centroid - axis).abs() <= 0.5,
-                "face ink on subpixel row {y} is {:+.1} off the crab's axis \
-                 (centroid {centroid:.1}, axis {axis:.1})",
-                centroid - axis
+        let d = crab_cells(&render_buf(&dark, W, H));
+        let l = crab_cells(&render_buf(&light, W, H));
+        assert!(!d.is_empty() && !l.is_empty(), "both themes must paint a crab");
+        assert_eq!(d.len(), l.len(), "themes painted different numbers of crab cells");
+        for (a, b) in d.iter().zip(l.iter()) {
+            assert_eq!(
+                (a.0, a.1, &a.2, a.3),
+                (b.0, b.1, &b.2, b.3),
+                "a crab cell differs between dark and light themes"
             );
         }
-        assert_eq!(face_rows, 7, "the face spans 7 subpixel rows (5 of eyes, 2 of mouth)");
-
-        // (3) The face as a whole is mirror-placed: its bounding box's left and right
-        // edges are equidistant from the axis, so `lo + hi == w - 1`. This is placement
-        // only — the eyes' INTERIORS are deliberately not mirrored (both glints sit on
-        // the same side, as in the logo), so it cannot be satisfied by restyling.
-        let all: Vec<usize> = (0..FERRIS_H * 2).flat_map(|y| face_cols(&grid, y)).collect();
-        let (lo, hi) = (*all.iter().min().unwrap(), *all.iter().max().unwrap());
-        assert_eq!(
-            lo + hi,
-            w - 1,
-            "the face's bounding box [{lo}, {hi}] is not centred on the crab's axis \
-             (it would have to mirror onto [{}, {}])",
-            w - 1 - hi,
-            w - 1 - lo
-        );
     }
 
-    /// Page width whose Summary interior is 35 — one column under `FERRIS_W` (36),
-    /// so it exercises the width guard right at its boundary.
-    const NARROW_W: u16 = 88;
-
+    /// Not run in the normal suite; dumps the crab's silhouette and the fitted
+    /// width for a range of terminal sizes, so the art can be eyeballed without
+    /// launching the TUI:
+    ///   cargo test --bin xiao-generate -- --ignored --nocapture dump_ferris_fit
     #[test]
-    fn crab_omitted_when_panel_too_narrow() {
-        // Interior width < FERRIS_W → no crab, but the panel still renders cleanly.
-        let (iw, _ih) = summary_interior(NARROW_W, H);
-        assert!((iw as usize) < FERRIS_W, "precondition: narrow panel (iw={iw})");
-        assert_eq!(iw as usize, FERRIS_W - 1, "precondition: narrow by exactly one column");
-        let buf = render_buf(&app_on("xiao-esp32c6", 0), NARROW_W, H);
-        assert!(render(&app_on("xiao-esp32c6", 0), NARROW_W, H).contains("Summary"),
-            "panel still renders when too narrow");
-        assert!(crab_cells(&buf).is_empty(), "no crab in a too-narrow panel");
-
-        // One column wider the guard opens again — proving it is the WIDTH that
-        // omitted the crab, not some unrelated layout accident.
-        let (iw2, _) = summary_interior(NARROW_W + 2, H);
-        assert!((iw2 as usize) >= FERRIS_W, "precondition: two columns wider fits (iw={iw2})");
-        let wider = render_buf(&app_on("xiao-esp32c6", 0), NARROW_W + 2, H);
-        assert!(!crab_cells(&wider).is_empty(), "crab returns once the panel is wide enough");
+    #[ignore]
+    fn dump_ferris_fit() {
+        for (w, h) in [(100, 30), (120, 35), (140, 40), (170, 45), (200, 50)] {
+            let (iw, _) = summary_interior(w, h);
+            let buf = render_buf(&app_on("xiao-esp32c6", 0), w, h);
+            let cells = crab_cells(&buf);
+            println!("\n===== terminal {w}x{h} — summary interior {iw} =====");
+            if cells.is_empty() {
+                println!("(no crab — panel too small)");
+                continue;
+            }
+            let (x0, x1) = (
+                cells.iter().map(|c| c.0).min().unwrap(),
+                cells.iter().map(|c| c.0).max().unwrap(),
+            );
+            let (y0, y1) = (
+                cells.iter().map(|c| c.1).min().unwrap(),
+                cells.iter().map(|c| c.1).max().unwrap(),
+            );
+            println!("art {}x{} cells at ({x0},{y0})", x1 - x0 + 1, y1 - y0 + 1);
+            for y in y0..=y1 {
+                let row: String = (x0..=x1)
+                    .map(|x| {
+                        buf.cell((x, y))
+                            .filter(|c| is_crab_glyph(c.symbol()))
+                            .map_or('.', |_| '#')
+                    })
+                    .collect();
+                println!("{row}");
+            }
+        }
     }
-
-    /// Page height that leaves only 9 spare rows under the summary text — two short
-    /// of `FERRIS_H` (11), so it exercises the height guard near its boundary.
-    const SHORT_H: u16 = 32;
-
-    #[test]
-    fn crab_omitted_when_panel_too_short() {
-        // Wide enough, but too few leftover rows below the summary text → no crab.
-        let (iw, _ih) = summary_interior(W, SHORT_H);
-        assert!((iw as usize) >= FERRIS_W, "precondition: wide enough (iw={iw})");
-        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, SHORT_H);
-        assert!(render(&app_on("xiao-esp32c6", 0), W, SHORT_H).contains("Summary"),
-            "panel still renders when too short");
-        assert!(crab_cells(&buf).is_empty(), "no crab when the panel is too short");
-
-        // It really is the HEIGHT that closed the guard, not the width or some other
-        // layout accident: the same width two rows taller clears the bar and the crab
-        // comes back — so SHORT_H sits just under the threshold.
-        let taller = render_buf(&app_on("xiao-esp32c6", 0), W, SHORT_H + 2);
-        assert!(!crab_cells(&taller).is_empty(), "crab returns once the panel is tall enough");
-    }
-
-    #[test]
-    fn crab_color_is_pinned_across_themes() {
-        // The crab's inks are FIXED truecolor, identical in BOTH themes (they do NOT
-        // follow theme.accent). Compare the painted cells (position + glyph + fg)
-        // cell-for-cell between dark and light: they must match exactly.
-        let dark = crab_cells(&render_buf(
-            &{ let mut a = app_on("xiao-esp32c6", 0); a.dark = true; a }, W, H));
-        let light = crab_cells(&render_buf(
-            &{ let mut a = app_on("xiao-esp32c6", 0); a.dark = false; a }, W, H));
-        assert!(!dark.is_empty(), "crab must render");
-        assert_eq!(dark, light, "crab glyphs+fg must be identical across themes");
-
-        // The pinned body orange is present, and the light theme's (blue) accent is
-        // NOT used by any crab cell — proving the crab does not follow the theme.
-        let fgs: std::collections::HashSet<Color> = dark.iter().map(|c| c.3).collect();
-        assert!(fgs.contains(&FERRIS_ORANGE), "crab must paint its pinned body colour");
-        assert!(!fgs.contains(&Theme::light().accent), "crab must not use the theme accent");
-        assert_ne!(Theme::light().accent, FERRIS_ORANGE, "light accent should differ from the pin");
-    }
-
 
     /// Not run in the normal suite; run explicitly to dump verbatim snapshots:
     ///   cargo test --bin xiao-generate -- --ignored --nocapture print_form_snapshots
@@ -2227,67 +1961,5 @@ mod tests {
         dump("(f) µFerris enabled — xiao-esp32c3 / esp-hal (power/async live + note)", &fsnap);
     }
 
-    /// Not run in the normal suite; dumps every painted crab cell as
-    ///   x y <glyph> fr fg fb br bg bb
-    /// from the REAL rendered TUI buffer, so an external tool can redraw the crab
-    /// exactly as the terminal shows it (colored half-blocks on the dark panel bg):
-    ///   cargo test --bin xiao-generate -- --ignored --nocapture dump_ferris_cells
-    #[test]
-    #[ignore]
-    fn dump_ferris_cells() {
-        let rgb = |c: Color| -> (u8, u8, u8) {
-            match c {
-                Color::Rgb(r, g, b) => (r, g, b),
-                _ => (0, 0, 0),
-            }
-        };
-        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
-        let (br, bg, bb) = rgb(Theme::dark().bg);
-        println!("PANEL {br} {bg} {bb}");
-        let a = buf.area;
-        for y in 0..a.height {
-            for x in 0..a.width {
-                if let Some(cell) = buf.cell((x, y)) {
-                    if is_crab_glyph(cell.symbol()) {
-                        let (fr, fg, fb) = rgb(cell.fg);
-                        let (kr, kg, kb) = rgb(cell.bg);
-                        println!("{x} {y} {} {fr} {fg} {fb} {kr} {kg} {kb}", cell.symbol());
-                    }
-                }
-            }
-        }
-    }
 
-    /// Not run in the normal suite; dumps the crab's WHOLE `FERRIS_W`×`FERRIS_H` box
-    /// from the real buffer — blank cells included, and with unset colours reported as
-    /// `-` rather than collapsed to black — so an external tool can expand every cell
-    /// to its 2×2 subpixels and diff it against the art:
-    ///   cargo test --bin xiao-generate -- --ignored --nocapture dump_ferris_region
-    #[test]
-    #[ignore]
-    fn dump_ferris_region() {
-        let col = |c: Color| -> String {
-            match c {
-                Color::Rgb(r, g, b) => format!("{r},{g},{b}"),
-                _ => "-".to_string(),
-            }
-        };
-        let buf = render_buf(&app_on("xiao-esp32c6", 0), W, H);
-        let cells = crab_cells(&buf);
-        let x0 = cells.iter().map(|c| c.0).min().unwrap();
-        let y0 = cells.iter().map(|c| c.1).min().unwrap();
-        println!("ORIGIN {x0} {y0}");
-        for dy in 0..FERRIS_H as u16 {
-            for dx in 0..FERRIS_W as u16 {
-                if let Some(cell) = buf.cell((x0 + dx, y0 + dy)) {
-                    println!(
-                        "{dx} {dy} [{}] {} {}",
-                        cell.symbol(),
-                        col(cell.fg),
-                        col(cell.bg)
-                    );
-                }
-            }
-        }
-    }
 }

@@ -177,7 +177,7 @@ fn snapshot_c3_base_leaves_esp_generate_main_intact() {
 
     // esp-generate emits editor config only under its per-editor `-o` options
     // (which we do not pass), so we supply the editor-agnostic file ourselves.
-    assert_rust_analyzer_config(&out, "esp-hal no_std");
+    assert_rust_analyzer_toml(&out, "esp-hal no_std");
 }
 
 #[test]
@@ -383,7 +383,7 @@ fn snapshot_c3_esp_idf_std_hello() {
         "expectation is premised on build-std; .cargo/config.toml:\n{cfg}"
     );
     assert!(!cfg.contains("\"test\""), "if build-std gained `test`, revisit:\n{cfg}");
-    assert_rust_analyzer_config(&out, "esp-idf std");
+    assert_rust_analyzer_toml(&out, "esp-idf std");
 }
 
 // ---------------------------------------------------------------------------
@@ -455,8 +455,15 @@ fn non_esp_scaffold_writes_the_full_project_tree() {
 /// spurious `can't find crate for `test`` diagnostic. Shared by the non-ESP and
 /// ESP checks below because the requirement is backend-independent.
 fn assert_rust_analyzer_config(out: &Path, what: &str) {
-    // 1. The editor-agnostic file, in rust-analyzer.toml's un-prefixed, nested
-    //    form. Keys are the ones `rust-analyzer --print-config-schema` documents.
+    assert_rust_analyzer_toml(out, what);
+    assert_vscode_client_config(out, what);
+}
+
+/// The editor-agnostic `rust-analyzer.toml`, which EVERY generated project gets
+/// regardless of `--editor` (including `--editor none`, the default).
+fn assert_rust_analyzer_toml(out: &Path, what: &str) {
+    // In rust-analyzer.toml's un-prefixed, nested form. Keys are the ones
+    // `rust-analyzer --print-config-schema` documents.
     let path = out.join("rust-analyzer.toml");
     assert!(path.exists(), "{what}: missing rust-analyzer.toml");
     let s = std::fs::read_to_string(&path).unwrap();
@@ -468,8 +475,12 @@ fn assert_rust_analyzer_config(out: &Path, what: &str) {
         "{what}: expected both cargo.allTargets and check.allTargets to be false:\n{s}"
     );
 
-    // 2. The VS Code client-config file — the delivery path actually verified to
-    //    suppress the diagnostic (rust-analyzer.toml alone does not, as of 1.97.1).
+}
+
+/// The VS Code client-config file — the delivery path actually verified to
+/// suppress the diagnostic (rust-analyzer.toml alone does not, as of 1.97.1).
+/// Only written when the user asks for it with `--editor vscode`.
+fn assert_vscode_client_config(out: &Path, what: &str) {
     let vs = out.join(".vscode/settings.json");
     assert!(vs.exists(), "{what}: missing .vscode/settings.json");
     let v = std::fs::read_to_string(&vs).unwrap();
@@ -497,7 +508,7 @@ fn non_esp_projects_ship_rust_analyzer_config() {
     for (chip, stack, framework, _) in NON_ESP_CELLS {
         let out = tmp.path().join(format!("{chip}-{stack}-{framework}"));
         generate_cell(chip, stack, framework, &out);
-        assert_rust_analyzer_config(&out, &format!("{chip}/{stack}/{framework}"));
+        assert_rust_analyzer_toml(&out, &format!("{chip}/{stack}/{framework}"));
     }
 }
 
@@ -736,28 +747,6 @@ fn check_rejects_an_invalid_config_before_probing() {
     assert!(String::from_utf8_lossy(&res.stderr).contains("--chip"));
 }
 
-/// The old unconditional advice is gone: the report is conditional, so a target
-/// that IS installed must not still be accompanied by "rustup target add".
-#[test]
-fn an_installed_target_is_not_also_advertised_as_a_next_step() {
-    if !target_installed("thumbv6m-none-eabi") {
-        eprintln!("skipping: thumbv6m-none-eabi not installed");
-        return;
-    }
-    let tmp = tempfile::tempdir().unwrap();
-    let out = tmp.path().join("no-stale-advice");
-    let res = bin()
-        .args(["--chip", "xiao-rp2040", "-o", out.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let s = String::from_utf8_lossy(&res.stdout);
-    assert!(
-        !s.contains("rustup target add"),
-        "the target is installed — the summary must not tell the user to add it:\n{s}"
-    );
-    assert!(s.contains("✔ Rust target thumbv6m-none-eabi"), "…but must confirm it:\n{s}");
-}
-
 /// `--editor` takes exactly ONE value: a second occurrence is a clap usage error,
 /// not a silently-merged selection.
 #[test]
@@ -775,16 +764,37 @@ fn editor_flag_is_not_repeatable() {
     assert!(!out.exists(), "nothing must be written for a rejected invocation");
 }
 
+/// The opposite of `editor_none_writes_no_editor_specific_files`: asking for an
+/// editor must deliver BOTH halves — the project-level `rust-analyzer.toml` and
+/// that editor's client config. The client config is the half actually verified
+/// to suppress `E0463` (the .toml alone does not, as of rust-analyzer 1.97.1), so
+/// a regression that dropped it would leave the diagnostic in place while looking
+/// like the feature still worked.
 #[test]
-fn editor_none_writes_no_editor_files_at_all() {
+fn editor_vscode_writes_both_the_project_file_and_the_client_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("vscode");
+    let mut c = bin();
+    c.args(["--chip", "xiao-rp2040", "--editor", "vscode", "-o", out.to_str().unwrap()]);
+    assert!(c.output().unwrap().status.success());
+    assert_rust_analyzer_config(&out, "--editor vscode");
+}
+
+#[test]
+fn editor_none_writes_no_editor_specific_files() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("none");
     let mut c = bin();
     c.args(["--chip", "xiao-rp2040", "--editor", "none", "-o", out.to_str().unwrap()]);
     assert!(c.output().unwrap().status.success());
 
-    // Not even the editor-agnostic file: `none` means "no editor config".
-    assert!(!out.join("rust-analyzer.toml").exists(), "--editor none must not write rust-analyzer.toml");
+    // `rust-analyzer.toml` is NOT an editor file — it is a project file that
+    // rust-analyzer reads itself, so it ships even here. `none` is the default,
+    // so gating it on the editor would leave the typical project with no
+    // rust-analyzer config at all.
+    assert_rust_analyzer_toml(&out, "--editor none");
+
+    // What `none` does suppress: every editor-SPECIFIC client config.
     for (id, path, _) in EDITOR_FILES {
         assert!(!out.join(path).exists(), "--editor none must not write {id}'s {path}");
     }
@@ -797,16 +807,19 @@ fn editor_none_writes_no_editor_files_at_all() {
 /// still carry the VS Code client config that clears the spurious `test`-crate
 /// error. This is the behaviour every project has always had.
 #[test]
-fn default_still_emits_the_working_vscode_config() {
+fn the_default_writes_no_editor_files_but_still_ships_rust_analyzer_toml() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join("default");
     generate_cell("xiao-rp2040", "rp2040-hal", "none", &out);
-    assert_rust_analyzer_config(&out, "default (no --editor)");
-    // …and only VS Code's file — the other editors are opt-in.
+
+    // The editor-agnostic file is unconditional — it is what keeps a plain
+    // `cargo build` project from tripping E0463 in whatever editor the user runs.
+    assert_rust_analyzer_toml(&out, "default (no --editor)");
+
+    // Writing into someone's editor configuration is opt-in, and `none` is the
+    // default, so NO editor's file may appear — VS Code's included.
     for (id, path, _) in EDITOR_FILES {
-        if *id != "vscode" {
-            assert!(!out.join(path).exists(), "default must not write {id}'s {path}");
-        }
+        assert!(!out.join(path).exists(), "default must not write {id}'s {path}");
     }
 }
 

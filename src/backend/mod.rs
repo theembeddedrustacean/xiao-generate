@@ -67,14 +67,21 @@ pub fn scaffold(cfg: &Config) -> Result<()> {
 fn write_editor_config(cfg: &Config) -> Result<()> {
     let out = &cfg.out_dir;
 
-    // `--editor none`: emit nothing, not even the editor-agnostic file.
-    let Some(editor_path) = cfg.editor.path else {
-        return Ok(());
-    };
-
+    // `rust-analyzer.toml` is written UNCONDITIONALLY, `--editor none` included.
+    //
+    // It is not an editor's config file — it is a project file that rust-analyzer
+    // reads itself, so it belongs to the generated project rather than to whoever
+    // is editing it. Since `none` is the default, gating this on the editor choice
+    // would mean the typical project ships no rust-analyzer config at all, which
+    // is the E0463-on-every-project problem this exists to solve.
     let ratoml = out.join("rust-analyzer.toml");
     std::fs::write(&ratoml, templates::rust_analyzer_toml())
         .with_context(|| format!("writing {}", ratoml.display()))?;
+
+    // `--editor none`: no editor-SPECIFIC client config beyond that.
+    let Some(editor_path) = cfg.editor.path else {
+        return Ok(());
+    };
 
     let path = out.join(editor_path);
     // Never clobber a file a backend already produced.

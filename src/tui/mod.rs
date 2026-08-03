@@ -47,7 +47,7 @@
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
@@ -619,12 +619,38 @@ fn wrapped_height(lines: &[Line], width: u16) -> u16 {
     height
 }
 
+/// Below this the one-page form + summary layout cannot render coherently — the
+/// panels get too narrow for their titles or too short to show anything useful —
+/// so `draw` shows a "resize me" message instead of a broken, clipped layout.
+const MIN_W: u16 = 54;
+const MIN_H: u16 = 12;
+
 fn draw(f: &mut Frame, app: &App) {
     let theme = app.theme();
 
     // Paint the whole frame with the themed background first so gaps between
     // panels are filled (dark theme = genuinely dark background, not just text).
     f.render_widget(Block::default().style(Style::default().bg(theme.bg)), f.area());
+
+    // Too small to lay out: say so plainly rather than cramming a broken layout.
+    let area = f.area();
+    if area.width < MIN_W || area.height < MIN_H {
+        let top = area.height / 2;
+        let mut lines = vec![Line::from(""); usize::from(top.saturating_sub(1))];
+        lines.push(Line::styled(
+            "Terminal too small",
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::styled(
+            format!("resize to at least {MIN_W}×{MIN_H} (now {}×{})", area.width, area.height),
+            Style::default().fg(theme.enabled),
+        ));
+        f.render_widget(
+            Paragraph::new(lines).alignment(Alignment::Center).style(theme.base()),
+            area,
+        );
+        return;
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -821,9 +847,15 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let focus = app.focus;
 
     let mut lines: Vec<Line> = Vec::new();
+    // The line index of the focused row, tracked as the form is built so the
+    // Paragraph can be scrolled to keep it visible on a short terminal.
+    let mut focus_line: u16 = 0;
 
     // ---- DEVICE: the variant cycler, its own section ----
     lines.push(heading(theme, "DEVICE"));
+    if focus == Row::Device {
+        focus_line = lines.len() as u16;
+    }
     lines.push(field_line(
         theme,
         focus == Row::Device,
@@ -839,6 +871,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         // The display string already carries the std/no_std family where it
         // applies; the only extra marker is a subtle "(default)" on the default.
         let hint = if i == 0 { "(default)" } else { "" };
+        if focus == Row::Stack(i) {
+            focus_line = lines.len() as u16;
+        }
         lines.push(radio_line(
             theme,
             focus == Row::Stack(i),
@@ -902,6 +937,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     ToolCategory::Framework => "",
                 }
             };
+            if focused {
+                focus_line = lines.len() as u16;
+            }
             lines.push(radio_line(theme, focused, selected, greyed, inactive, "  ", choice.display, hint));
         }
     }
@@ -922,6 +960,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             Some(c) if selected => c,
             _ => "",
         };
+        if focus == Row::Editor(i) {
+            focus_line = lines.len() as u16;
+        }
         lines.push(radio_line(
             theme,
             focus == Row::Editor(i),
@@ -941,6 +982,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // Eligibility hint only on the ENABLED toggle; a greyed µFerris toggle shows
     // no reason beside it — greying alone signals it is unavailable.
     let uf_hint = if uf_enabled { "esp-hal C3/C6" } else { "" };
+    if focus == Row::Uferris {
+        focus_line = lines.len() as u16;
+    }
     lines.push(toggle_line(
         theme,
         focus == Row::Uferris,
@@ -953,6 +997,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // Power/async hints appear only while their toggles are live (µFerris on);
     // when greyed they carry no reason text.
     let pb_hint = if app.uferris_on { "Megalops (INA219 + SD)" } else { "" };
+    if focus == Row::PowerBoard {
+        focus_line = lines.len() as u16;
+    }
     lines.push(toggle_line(
         theme,
         focus == Row::PowerBoard,
@@ -969,6 +1016,9 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     } else {
         "gap — no verified non-async µFerris"
     };
+    if focus == Row::Async {
+        focus_line = lines.len() as u16;
+    }
     lines.push(toggle_line(
         theme,
         focus == Row::Async,
@@ -979,10 +1029,22 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         async_hint,
     ));
 
-    let form = Paragraph::new(lines).style(theme.base()).block(
+    // Scroll to keep the focused row visible when the form is taller than its
+    // panel. Only scrolls once the focus would fall below the fold, and never
+    // past the end. `↕` in the title signals there is more off-screen.
+    let inner_h = area.height.saturating_sub(2);
+    let total = lines.len() as u16;
+    let max_off = total.saturating_sub(inner_h);
+    let offset = if focus_line < inner_h {
+        0
+    } else {
+        (focus_line + 1 - inner_h).min(max_off)
+    };
+    let title = if max_off > 0 { " Configure ↕ " } else { " Configure " };
+    let form = Paragraph::new(lines).style(theme.base()).scroll((offset, 0)).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Configure ")
+            .title(title)
             .border_style(Style::default().fg(theme.border).bg(theme.bg))
             .style(Style::default().bg(theme.bg)),
     );
@@ -2005,6 +2067,41 @@ mod tests {
         assert!(s.contains("Host tools missing"), "missing note:\n{s}");
         assert!(s.contains("picotool"), "missing note names the flash tool:\n{s}");
         assert!(s.contains("--check"), "missing note points at --check:\n{s}");
+    }
+
+    /// A terminal below the minimum usable size shows a plain "resize me" message
+    /// instead of a clipped, broken layout. At the minimum, the real UI renders.
+    #[test]
+    fn a_too_small_terminal_shows_a_resize_message() {
+        let app = app_on("xiao-esp32c6", 0);
+        for (w, h) in [(super::MIN_W - 1, 30u16), (100, super::MIN_H - 1)] {
+            let s = render(&app, w, h);
+            assert!(s.contains("Terminal too small"), "{w}x{h} should show the message:\n{s}");
+            assert!(!s.contains("Configure"), "{w}x{h} must not draw the (broken) form panel");
+        }
+        let s = render(&app, super::MIN_W, super::MIN_H);
+        assert!(s.contains("Configure"), "at the minimum the real UI renders:\n{s}");
+        assert!(!s.contains("Terminal too small"));
+    }
+
+    /// On a terminal too short for the whole form, the form scrolls to keep the
+    /// focused row visible (so navigating never loses it below the fold), and the
+    /// title shows a `↕` marker. A tall terminal shows everything, no marker.
+    #[test]
+    fn a_short_terminal_scrolls_the_form_to_the_focused_row() {
+        let mut app = app_on("xiao-esp32c6", 0);
+        app.uferris_on = true;
+        app.focus = Row::Async; // the bottom-most row
+
+        let s = render(&app, 100, 18);
+        assert!(s.contains("async (embassy)"), "focused bottom row must scroll into view:\n{s}");
+        assert!(s.contains("Configure ↕"), "scroll marker must show when content is off-screen:\n{s}");
+        assert!(!s.contains("DEVICE"), "the top section must have scrolled off:\n{s}");
+
+        let tall = render(&app, 100, 60);
+        assert!(tall.contains("DEVICE"), "a tall terminal shows the top:\n{tall}");
+        assert!(tall.contains("async (embassy)"), "a tall terminal shows the bottom:\n{tall}");
+        assert!(!tall.contains("Configure ↕"), "no scroll marker when it all fits:\n{tall}");
     }
 
     /// Not run in the normal suite; dumps the crab's silhouette and the fitted

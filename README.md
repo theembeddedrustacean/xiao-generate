@@ -22,6 +22,8 @@ rather than a project that does not build.
 ## Install
 
 ```sh
+cargo install xiao-generate      # from crates.io
+# or, from a local clone:
 cargo install --path .
 ```
 
@@ -120,97 +122,31 @@ a compile-verified body: `camera-snapshot` and `sd-list` on the S3 Sense.
 
 ## Prerequisites
 
-These are the host tools a **generated project** needs. Only the ones your
-configuration actually uses matter — an RP2040 project has nothing to do with
-espup, and an ESP-IDF project has nothing to do with picotool.
+Each board needs a build target (or toolchain) and one USB flash tool — the
+default flash routes need no debug probe. You don't have to read this: after
+generating, the tool prints exactly what your project needs and whether it is
+installed, and `xiao-generate --check --chip <chip>` prints the same without
+generating anything.
 
-**You do not have to work this out from the table.** After generating, the tool
-prints exactly this list for the project it just made, probes each entry on your
-machine, marks it installed or missing, and shows the install command for the
-missing ones. `--check` prints the same report without generating anything:
-
-```sh
-xiao-generate --check --chip xiao-nrf52840
-```
-
-### Per device, at a glance
-
-The default (`no_std`) toolchain each XIAO needs. `--std` (ESP only) and
-`--flashing probe-rs` are alternatives — see the detailed tables below. Install
-commands for every tool named here are in **To build** / **To flash**.
-
-| XIAO device | Build | Flash (default — no probe) | Enter bootloader |
+| Device | Build | Flash | To use `--flashing probe-rs` |
 | --- | --- | --- | --- |
-| ESP32-C3 | target `riscv32imc-unknown-none-elf` | `espflash` | plug in — no button |
-| ESP32-C5 | target `riscv32imac-unknown-none-elf` | `espflash` **≥ 4.5** | plug in — no button |
-| ESP32-C6 | target `riscv32imac-unknown-none-elf` | `espflash` | plug in — no button |
-| ESP32-S3 (+Sense) | Xtensa `esp` toolchain (`espup`) | `espflash` | plug in — no button |
-| RP2040 | target `thumbv6m-none-eabi` | `picotool` | hold **B** while plugging in |
-| RP2350 | target `thumbv8m.main-none-eabihf` | `picotool` | hold **B** while plugging in |
-| nRF52840 (+Sense) | target `thumbv7em-none-eabihf` | `rust-objcopy` + `uf2conv.py` | double-tap **RESET** |
-| SAMD21 | target `thumbv6m-none-eabi` | `hf2-cli` | double-tap **RST** pads |
+| ESP32-C3 | `rustup target add riscv32imc-unknown-none-elf` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
+| ESP32-C5 | `rustup target add riscv32imac-unknown-none-elf` | `cargo install espflash --locked` (≥ 4.5) | `cargo install probe-rs-tools --locked` (≥ 0.31) — built-in USB-JTAG, no probe |
+| ESP32-C6 | `rustup target add riscv32imac-unknown-none-elf` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
+| ESP32-S3 (+Sense) | `cargo install espup --locked && espup install` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
+| RP2040 | `rustup target add thumbv6m-none-eabi` | `brew install picotool` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
+| RP2350 | `rustup target add thumbv8m.main-none-eabihf` | `brew install picotool` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
+| nRF52840 (+Sense) | `rustup target add thumbv7em-none-eabihf` | `cargo install cargo-binutils && rustup component add llvm-tools`, then put `uf2conv.py` + `uf2families.json` ([microsoft/uf2](https://github.com/microsoft/uf2) `utils/`) on `PATH` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
+| SAMD21 | `rustup target add thumbv6m-none-eabi` | `cargo install hf2-cli` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
 
-`--flashing probe-rs` works on every ESP over the chip's built-in USB-Serial-JTAG
-— **no external probe** — and on the Cortex-M boards only with an external SWD
-probe. It needs `probe-rs` ≥ 0.31 (which is also the floor for the C5). The
-**ESP32-C5 is newer silicon**: espflash must be ≥ 4.5 (older releases fail chip
-detection on it) and probe-rs ≥ 0.31.
+**Enter the bootloader before flashing** — ESP: just plug in USB-C. RP2040 /
+RP2350: hold **B** while plugging in. nRF52840: double-tap **RESET**. SAMD21:
+short the two **RST** pads twice.
 
-### To build
-
-| Applies to | Prerequisite | Install |
-| --- | --- | --- |
-| ESP32-C3, `esp-hal` | Rust target `riscv32imc-unknown-none-elf` | `rustup target add riscv32imc-unknown-none-elf` |
-| ESP32-C5/C6, `esp-hal` | Rust target `riscv32imac-unknown-none-elf` | `rustup target add riscv32imac-unknown-none-elf` |
-| ESP32-S3(-Sense), **either stack** | Xtensa `esp` toolchain | `cargo install espup --locked && espup install` |
-| ESP32-C3/C6, `esp-idf` | nightly toolchain + `rust-src` | `rustup toolchain install nightly --component rust-src` |
-| **any** `esp-idf` project | `ldproxy` | `cargo install ldproxy` |
-| **any** `esp-idf` project | `python3`, `git` on `PATH` | (system) |
-| RP2040, SAMD21 | Rust target `thumbv6m-none-eabi` | `rustup target add thumbv6m-none-eabi` |
-| RP2350 | Rust target `thumbv8m.main-none-eabihf` | `rustup target add thumbv8m.main-none-eabihf` |
-| nRF52840(-Sense) | Rust target `thumbv7em-none-eabihf` | `rustup target add thumbv7em-none-eabihf` |
-
-Three details that catch people out:
-
-- **Xtensa is not a rustup target.** `rustup target add xtensa-esp32s3-none-elf`
-  does not work and never will — the Xtensa backend is not in upstream LLVM. The
-  `esp` toolchain that `espup install` links is the only way to build for the
-  ESP32-S3, on `no_std` and `std` alike.
-- **The RISC-V ESP `std` targets are not rustup targets either.** They are
-  `build-std` targets, compiled from source, which is why they need *nightly*
-  with `rust-src` — and notably **not** espup, whose RISC-V support is on the
-  stable channel. Both are pinned by the generated project's
-  `rust-toolchain.toml`, so rustup will also install them on the first build.
-- **`cmake` and `ninja` are not prerequisites.** `esp-idf-sys` installs them
-  itself through `idf_tools.py`, along with the ESP-IDF SDK and its GCC/clang
-  toolchains. Only `python3` and `git` have to be there first. Expect the first
-  ESP-IDF build to take a long time — it downloads and builds the whole SDK.
-
-µFerris mode adds nothing to this list: `uferris-bsp` is an ordinary cargo
-dependency on the `esp-hal` stack.
-
-### To flash
-
-The non-ESP routes below are all **USB / UF2** — no SWD debug probe required.
-
-| Board | Prerequisite | Install |
-| --- | --- | --- |
-| ESP, `esp-hal` (default) | `espflash` | `cargo install espflash --locked` |
-| ESP, `esp-hal` with `--flashing probe-rs` | `probe-rs` ≥ 0.31 — over the built-in USB-JTAG, **no external probe** | `cargo install probe-rs-tools --locked` |
-| ESP, `esp-idf` | `espflash` (the template's cargo runner) | `cargo install espflash --locked` |
-| RP2040, RP2350 | `picotool` | `brew install picotool` |
-| nRF52840(-Sense) | `rust-objcopy` | `cargo install cargo-binutils && rustup component add llvm-tools` |
-| nRF52840(-Sense) | `uf2conv.py` **and** `uf2families.json` | from [github.com/microsoft/uf2](https://github.com/microsoft/uf2) (`utils/`) — put both on `PATH`; uf2conv.py reads the JSON from beside itself |
-| SAMD21 | `hf2-cli` | `cargo install hf2-cli` |
-
-Getting each board into its bootloader:
-
-| Board | How |
-| --- | --- |
-| ESP | just plug in USB-C — espflash resets the chip itself |
-| RP2040 / RP2350 | hold **B** while plugging in (or hold **B**, tap **RESET**, release **B**); a `RPI-RP2` / `RP2350` volume appears |
-| nRF52840 | double-tap **RESET** within ~500 ms; a `XIAO-BOOT` / `XIAO-SENSE` volume appears |
-| SAMD21 | short the two **RST** pads twice quickly (there is no reset button); an `Arduino` volume appears |
+**`--std` (ESP-IDF) builds** (C3 / C6 / S3 only) additionally need
+`cargo install ldproxy`, `python3` + `git` on `PATH`, and — on C3 / C6 —
+`rustup toolchain install nightly --component rust-src` (the S3 reuses its `esp`
+toolchain). The first build compiles the whole ESP-IDF SDK, so it is slow.
 
 ---
 

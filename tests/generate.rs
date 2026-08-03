@@ -54,6 +54,7 @@ fn list_chips_lists_all_variants() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("xiao-esp32s3-sense"));
     assert!(s.contains("xiao-esp32c3"));
+    assert!(s.contains("xiao-esp32c5"));
 }
 
 #[test]

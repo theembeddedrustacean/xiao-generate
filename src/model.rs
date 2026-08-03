@@ -1062,6 +1062,34 @@ mod tests {
     }
 
     #[test]
+    fn c5_resolves_to_esp_hal_base_blink_and_rejects_esp_idf() {
+        // Default resolution: esp-hal, base-blink (C5 has an LED), RISC-V target.
+        let c = Config::resolve(raw("xiao-esp32c5")).unwrap();
+        assert_eq!(c.stack.id, "esp-hal");
+        assert_eq!(c.stack.target, "riscv32imac-unknown-none-elf");
+        assert_eq!(c.template_id, "base-blink");
+        assert_eq!(c.flashing.id, "espflash");
+        assert_eq!(c.framework.id, "none");
+        assert!(c.uferris.is_none());
+        // The C5 has no esp-idf std stack — selecting it is rejected.
+        let mut r = raw("xiao-esp32c5");
+        r.stack = Some("esp-idf".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("not supported"), "got: {e}");
+        // µFerris is refused (the variant is not eligible).
+        let mut r = raw("xiao-esp32c5");
+        r.uferris = true;
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("not available"), "got: {e}");
+        // The default flash prerequisite is espflash; the build prereq is the target.
+        let ids: Vec<&str> = prerequisites(&Config::resolve(raw("xiao-esp32c5")).unwrap())
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, vec!["riscv32imac-unknown-none-elf", "espflash"]);
+    }
+
+    #[test]
     fn esp_idf_stack_selectable_on_esp_variants() {
         let mut r = raw("xiao-esp32s3");
         r.stack = Some("esp-idf".to_string());

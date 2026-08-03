@@ -1398,6 +1398,37 @@ pub const VARIANTS: &[Variant] = &[
         default_crates: &[],
     },
     Variant {
+        id: "xiao-esp32c5",
+        display: "XIAO ESP32-C5",
+        priority: 0,
+        chip: "esp32c5",
+        arch: Arch::RiscV,
+        led: Some(Led { gpio: 27, active_low: Some(true) }), // GPIO27, active-low ("L" LED): Seeed pinout + tested Arduino blink
+        // esp-hal (no_std) ONLY. No esp-idf std stack: the C5 ESP-IDF path is
+        // unverified against the pinned esp-idf-template, and an untested stack is
+        // never shipped. Add it once a std base project is compile-verified.
+        stacks: &[Stack {
+            id: "esp-hal",
+            display: ESP_HAL_DISPLAY,
+            backend: Backend::EspGenerate,
+            target: "riscv32imac-unknown-none-elf",
+            templates: ESP_BASE_ONLY,
+            uferris: true,
+            flashing: ESP_HAL_FLASHING,
+            logging: ESP_HAL_LOGGING,
+            frameworks: ESP_HAL_FRAMEWORKS,
+            scaffold: None,
+            builtin_debug: true,
+            build_prereqs: NO_PREREQS,
+            flash_prereqs: NO_PREREQS,
+        }],
+        // uferris-bsp 0.1.3 does NOT list the C5 (its board table marks C5 ❌), so
+        // µFerris is off for this variant — ineligible, not merely gapped.
+        uferris_chip_feature: None,
+        uferris_gap: None,
+        default_crates: &[],
+    },
+    Variant {
         id: "xiao-esp32s3",
         display: "XIAO ESP32-S3",
         priority: 0,
@@ -2088,7 +2119,7 @@ mod tests {
         // RTIC is a legit catalog entry (not an invented gap) — present in the
         // universal FRAMEWORKS catalog, but absent from every ESP stack's support.
         assert!(tool_choice(ToolCategory::Framework, "rtic").is_some());
-        for id in ["xiao-esp32c3", "xiao-esp32c6", "xiao-esp32s3", "xiao-esp32s3-sense"] {
+        for id in ["xiao-esp32c3", "xiao-esp32c5", "xiao-esp32c6", "xiao-esp32s3", "xiao-esp32s3-sense"] {
             let v = variant(id).unwrap();
             for s in v.stacks {
                 assert!(
@@ -2347,5 +2378,51 @@ mod tests {
         assert_eq!(variant("xiao-esp32s3").unwrap().led.unwrap().active_low, Some(true));
         assert!(variant("xiao-esp32c3").unwrap().led.is_none(), "C3 has no user LED");
         assert_eq!(template("camera-snapshot").unwrap().component, "camera");
+    }
+
+    /// The XIAO ESP32-C5 is a RISC-V P0 ESP part modelled on the C6, but esp-hal
+    /// ONLY (the std/esp-idf path is unverified) and with µFerris firmly off
+    /// (uferris-bsp 0.1.3 does not list the C5).
+    #[test]
+    fn c5_variant_is_correct() {
+        let c5 = variant("xiao-esp32c5").expect("xiao-esp32c5 must be registered");
+        assert_eq!(c5.display, "XIAO ESP32-C5");
+        assert_eq!(c5.priority, 0, "C5 is a P0 ESP variant like the other ESP parts");
+        assert_eq!(c5.chip, "esp32c5");
+        assert_eq!(c5.arch, Arch::RiscV);
+        // GPIO27, active-low "L" LED → carries the LED and supports base-blink.
+        assert_eq!(c5.led.unwrap().gpio, 27);
+        assert_eq!(c5.led.unwrap().active_low, Some(true));
+
+        // esp-hal ONLY: no esp-idf std stack (unverified path, never shipped).
+        assert_eq!(c5.stacks.len(), 1, "C5 ships the esp-hal stack alone");
+        assert!(c5.stack("esp-idf").is_none(), "C5 must NOT carry an esp-idf stack");
+        let esp_hal = c5.stack("esp-hal").expect("C5 has an esp-hal stack");
+        assert_eq!(c5.default_stack().id, "esp-hal");
+        assert!(matches!(esp_hal.backend, Backend::EspGenerate));
+        assert_eq!(esp_hal.target, "riscv32imac-unknown-none-elf");
+        assert!(esp_hal.builtin_debug);
+        // Copied from the C6 esp-hal stack verbatim: same support lists, templates
+        // and (empty) prereqs.
+        let c6_esp_hal = variant("xiao-esp32c6").unwrap().stack("esp-hal").unwrap();
+        assert_eq!(esp_hal.templates, c6_esp_hal.templates);
+        assert_eq!(esp_hal.flashing, c6_esp_hal.flashing);
+        assert_eq!(esp_hal.logging, c6_esp_hal.logging);
+        assert_eq!(esp_hal.frameworks, c6_esp_hal.frameworks);
+        assert_eq!(esp_hal.build_prereqs, c6_esp_hal.build_prereqs);
+        assert_eq!(esp_hal.flash_prereqs, c6_esp_hal.flash_prereqs);
+        // base-blink is the default template (first listed, LED present).
+        assert_eq!(esp_hal.templates.first(), Some(&"base-blink"));
+
+        // µFerris is OFF: ineligible (no chip feature), and no gap either.
+        assert!(esp_hal.default_tool(ToolCategory::Framework).unwrap().id == "none");
+        assert!(c5.uferris_chip_feature.is_none(), "C5 is not µFerris-eligible");
+        assert!(c5.uferris_gap.is_none());
+        assert!(!c5.uferris_eligible(), "uferris-bsp 0.1.3 does not support the C5");
+        assert!(
+            !crate::model::uferris_available(c5, esp_hal),
+            "µFerris must be firmly off for the C5"
+        );
+        assert!(c5.default_crates.is_empty());
     }
 }

@@ -1112,6 +1112,9 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // Drawn only when there is room for the whole crab plus that gap AND at least
     // `FERRIS_MIN_GAP` blank rows between it and the text; otherwise omitted
     // entirely (never wrapped or clipped) via `ferris::lines` returning None.
+    //
+    // DARK MODE ONLY: the crab is a dark-theme flourish; in light mode the Summary
+    // panel stays plain text. So it is skipped entirely unless `app.dark`.
     const FERRIS_BOTTOM_MARGIN: u16 = 1;
     const FERRIS_MIN_GAP: u16 = 1;
     let interior_w = area.width.saturating_sub(2);
@@ -1119,7 +1122,7 @@ fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let content_h = wrapped_height(&lines, interior_w);
     let below = interior_h.saturating_sub(content_h);
     let art_budget = below.saturating_sub(FERRIS_BOTTOM_MARGIN + FERRIS_MIN_GAP);
-    if let Some(art) = ferris::lines(interior_w, art_budget) {
+    if let Some(art) = app.dark.then(|| ferris::lines(interior_w, art_budget)).flatten() {
         // Absolute top row of the crab = interior_h - art_h - bottom_margin, which
         // is independent of content_h — that is what stops the drift. Expressed as
         // padding to append after the text, that is `below - art_h - margin`, and
@@ -1913,13 +1916,12 @@ mod tests {
         );
     }
 
-    /// The crab must look identical in both themes.
-    ///
-    /// Its inks come from the logo's own pixels rather than the palette, so this
-    /// is a property of rendering from the image — but it was an explicit
-    /// requirement, and a future "theme the art" change would silently break it.
+    /// The crab is a dark-theme flourish only: it must be painted in dark mode and
+    /// entirely absent in light mode. (Its inks still come from the logo's own
+    /// pixels, so when it IS drawn it is not palette-themed — but light mode omits
+    /// it altogether rather than recolouring it.)
     #[test]
-    fn crab_colour_does_not_follow_the_theme() {
+    fn crab_is_dark_mode_only() {
         let mut dark = app_on("xiao-esp32c6", 0);
         dark.dark = true;
         let mut light = app_on("xiao-esp32c6", 0);
@@ -1927,15 +1929,8 @@ mod tests {
 
         let d = crab_cells(&render_buf(&dark, W, H));
         let l = crab_cells(&render_buf(&light, W, H));
-        assert!(!d.is_empty() && !l.is_empty(), "both themes must paint a crab");
-        assert_eq!(d.len(), l.len(), "themes painted different numbers of crab cells");
-        for (a, b) in d.iter().zip(l.iter()) {
-            assert_eq!(
-                (a.0, a.1, &a.2, a.3),
-                (b.0, b.1, &b.2, b.3),
-                "a crab cell differs between dark and light themes"
-            );
-        }
+        assert!(!d.is_empty(), "dark mode must paint a crab");
+        assert!(l.is_empty(), "light mode must paint NO crab, got {} cells", l.len());
     }
 
     /// Not run in the normal suite; dumps the crab's silhouette and the fitted

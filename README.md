@@ -1,54 +1,19 @@
-# xiao-generate
+# `xiao-generate`
 
-Generate ready-to-build Rust projects for [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
-modules.
+Generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
+line of SoCs & modules.
 
-One command produces a project that compiles: the right target triple, the right
-HAL at a version that is actually verified to work with it, a linker script and
-`build.rs` where the chip needs them, an onboard-LED blink (or a serial hello on
-the boards without a user LED), and rust-analyzer configuration so your editor
-does not light up with a spurious `can't find crate for test`.
-
-Nine XIAO variants across three architectures, each with its real stacks — ESP
-`no_std` and `std`, blocking HALs and embassy HALs — and an optional
+At present, this tool supports Nine XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs — and an optional
 [µFerris](https://crates.io/crates/uferris-bsp) BSP mode on the ESP RISC-V parts.
 
-Everything the tool knows about a board lives in one declarative registry, and
-anything that cannot be generated correctly is a **declared gap** with a reason
-rather than a project that does not build.
+Supported variants include the XIAO-ESP32-C3/C5/C6/S3, XIAO-RP2040, XIAO-RP2350, XIAO-SAMD21, XIAO-nRF52840 and XIAO-RA4M1. Support for additional devices will be added as they become available.
 
----
 
-## Install
+## Quickstart
 
 ```sh
-cargo install xiao-generate      # from crates.io
-# or, from a local clone:
-cargo install --path .
+cargo install xiao-generate
 ```
-
-That is the only install command. The two ESP stacks shell out to a pinned
-upstream generator (`esp-generate` for `no_std`, `cargo-generate` for `std`), and
-`xiao-generate` installs the one it needs **on demand, the first time you
-generate an ESP project** — it checks on every run, and if the backend is
-missing it asks before installing:
-
-```
-esp-generate is required for this stack but isn't installed.
-  install it now with `cargo install esp-generate --version 1.3.0 --locked`? [Y/n]
-```
-
-- Answer `y` (or just Enter) and it installs the pinned version and continues.
-- `--yes` / `-y` installs without asking (for scripts and CI).
-- `--no-install` never installs — it prints the `cargo install` command and stops,
-  so you can run it yourself.
-
-Non-ESP boards need no backend at all (the Cortex-M project is written directly),
-so none of this applies to them. These backends are `xiao-generate`'s own
-dependencies; the prerequisites for the *generated project* are a separate list —
-see [Prerequisites](#prerequisites).
-
----
 
 ## Usage
 

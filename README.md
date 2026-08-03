@@ -133,12 +133,35 @@ missing ones. `--check` prints the same report without generating anything:
 xiao-generate --check --chip xiao-nrf52840
 ```
 
+### Per device, at a glance
+
+The default (`no_std`) toolchain each XIAO needs. `--std` (ESP only) and
+`--flashing probe-rs` are alternatives — see the detailed tables below. Install
+commands for every tool named here are in **To build** / **To flash**.
+
+| XIAO device | Build | Flash (default — no probe) | Enter bootloader |
+| --- | --- | --- | --- |
+| ESP32-C3 | target `riscv32imc-unknown-none-elf` | `espflash` | plug in — no button |
+| ESP32-C5 | target `riscv32imac-unknown-none-elf` | `espflash` **≥ 4.5** | plug in — no button |
+| ESP32-C6 | target `riscv32imac-unknown-none-elf` | `espflash` | plug in — no button |
+| ESP32-S3 (+Sense) | Xtensa `esp` toolchain (`espup`) | `espflash` | plug in — no button |
+| RP2040 | target `thumbv6m-none-eabi` | `picotool` | hold **B** while plugging in |
+| RP2350 | target `thumbv8m.main-none-eabihf` | `picotool` | hold **B** while plugging in |
+| nRF52840 (+Sense) | target `thumbv7em-none-eabihf` | `rust-objcopy` + `uf2conv.py` | double-tap **RESET** |
+| SAMD21 | target `thumbv6m-none-eabi` | `hf2-cli` | double-tap **RST** pads |
+
+`--flashing probe-rs` works on every ESP over the chip's built-in USB-Serial-JTAG
+— **no external probe** — and on the Cortex-M boards only with an external SWD
+probe. It needs `probe-rs` ≥ 0.31 (which is also the floor for the C5). The
+**ESP32-C5 is newer silicon**: espflash must be ≥ 4.5 (older releases fail chip
+detection on it) and probe-rs ≥ 0.31.
+
 ### To build
 
 | Applies to | Prerequisite | Install |
 | --- | --- | --- |
 | ESP32-C3, `esp-hal` | Rust target `riscv32imc-unknown-none-elf` | `rustup target add riscv32imc-unknown-none-elf` |
-| ESP32-C6, `esp-hal` | Rust target `riscv32imac-unknown-none-elf` | `rustup target add riscv32imac-unknown-none-elf` |
+| ESP32-C5/C6, `esp-hal` | Rust target `riscv32imac-unknown-none-elf` | `rustup target add riscv32imac-unknown-none-elf` |
 | ESP32-S3(-Sense), **either stack** | Xtensa `esp` toolchain | `cargo install espup --locked && espup install` |
 | ESP32-C3/C6, `esp-idf` | nightly toolchain + `rust-src` | `rustup toolchain install nightly --component rust-src` |
 | **any** `esp-idf` project | `ldproxy` | `cargo install ldproxy` |
@@ -173,7 +196,7 @@ The non-ESP routes below are all **USB / UF2** — no SWD debug probe required.
 | Board | Prerequisite | Install |
 | --- | --- | --- |
 | ESP, `esp-hal` (default) | `espflash` | `cargo install espflash --locked` |
-| ESP, `esp-hal` with `--flashing probe-rs` | `probe-rs` (needs an SWD probe) | `cargo install probe-rs-tools --locked` |
+| ESP, `esp-hal` with `--flashing probe-rs` | `probe-rs` ≥ 0.31 — over the built-in USB-JTAG, **no external probe** | `cargo install probe-rs-tools --locked` |
 | ESP, `esp-idf` | `espflash` (the template's cargo runner) | `cargo install espflash --locked` |
 | RP2040, RP2350 | `picotool` | `brew install picotool` |
 | nRF52840(-Sense) | `rust-objcopy` | `cargo install cargo-binutils && rustup component add llvm-tools` |

@@ -11,27 +11,33 @@ Supported variants include the XIAO-ESP32-C3/C5/C6/S3, XIAO-RP2040, XIAO-RP2350,
 
 ## Quickstart
 
+To generate a template you first need to install `xiao-generate`:
+
 ```sh
 cargo install xiao-generate
 ```
 
-## Usage
+Afterward, there are two modes, and they resolve the same configuration through the same validation before either one generates anything.
 
-There are two modes, and they resolve the same configuration through the same
-validation before either one generates anything.
+### Interactive TUI
+
+This is the simplest and recommended path. Everytime you want to generate a new project, navigate to the folder path you want the projec created and enter the following command:
+
+```sh
+xiao-generate --name my-project
+```
+
+`--name` is **required** to launch the TUI — this is the name you are giving to your project.
 
 ### Headless
 
-Forced with `--headless`, and implied whenever `--chip` is given.
+Using the CLI you can force a headless path by passing `--chip`:
 
 ```sh
 xiao-generate --chip xiao-rp2040
 ```
 
-`--chip` is **required** — there is no default device. Every other axis falls
-back to a registry default (the variant's default stack, its base template,
-espflash, no logging or framework, a name derived from the variant), so
-`--chip <chip>` alone is enough for a working project.
+`--chip` is **required** — there is no default device.
 
 ```sh
 # ESP32-C6, async, with defmt logging
@@ -53,21 +59,9 @@ xiao-generate --chip xiao-esp32c3 --uferris
 Useful listings: `--list-chips`, `--list-stacks [--chip X]`,
 `--list-templates [--chip X]`.
 
-### Interactive TUI
 
-The default when stdout is a terminal and no `--chip`/`--headless`/`--list-*` was
-given, or forced with `--tui`.
 
-```sh
-xiao-generate --name my-project
-```
 
-`--name` is **required** to launch the TUI — the crate name is a CLI concern, not
-a TUI field. Pick everything on one screen; unavailable combinations are greyed
-out with the reason. The summary screen shows the equivalent headless command,
-so anything you configure interactively can be scripted afterwards.
-
----
 
 ## Supported devices
 

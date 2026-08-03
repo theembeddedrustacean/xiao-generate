@@ -243,34 +243,55 @@ fn print_chips() {
     );
 }
 
+/// Render the per-variant `--list-stacks --chip <id>` report body — everything
+/// after the "Stacks for …" header. Extracted from [`print_stacks`] and returned
+/// as a string so the flashing/logging/framework support lines are unit-tested
+/// against the registry without capturing stdout.
+fn stacks_report(v: &registry::Variant) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (i, s) in v.stacks.iter().enumerate() {
+        let default = if i == 0 { "  [default]" } else { "" };
+        let _ = writeln!(out, "  {:<12} {}{}", s.id, s.display, default);
+        let _ = writeln!(out, "               target: {}", s.target);
+        // Frameworks are a live axis on the non-ESP stacks (M4) and on esp-hal;
+        // show which ones this stack can actually generate, and why the rest can't.
+        if !s.frameworks.is_empty() {
+            let available = s
+                .frameworks
+                .iter()
+                .filter(|f| s.framework_gap(f).is_none())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "               frameworks: {available}");
+            for f in s.frameworks {
+                if let Some(reason) = s.framework_gap(f) {
+                    let _ = writeln!(out, "                 {f}: [gap] {reason}");
+                }
+            }
+        }
+        // Flashing / logging: the SUPPORTED subset this stack declares (first id =
+        // its default), not the universal catalog — the same device-support data
+        // the scripts/matrix.sh harness enumerates each stack's axes from. An empty
+        // support list (esp-idf, whose toolchain the template fixes) prints no line,
+        // mirroring the frameworks omission — the signal that the axis is not live.
+        if !s.flashing.is_empty() {
+            let _ = writeln!(out, "               flashing: {}", s.flashing.join(", "));
+        }
+        if !s.logging.is_empty() {
+            let _ = writeln!(out, "               logging: {}", s.logging.join(", "));
+        }
+    }
+    out
+}
+
 fn print_stacks(chip: Option<&str>) {
     match chip {
         Some(id) => match registry::variant(id) {
             Some(v) => {
                 println!("Stacks for {} ({}):\n", v.display, v.id);
-                for (i, s) in v.stacks.iter().enumerate() {
-                    let default = if i == 0 { "  [default]" } else { "" };
-                    println!("  {:<12} {}{}", s.id, s.display, default);
-                    println!("               target: {}", s.target);
-                    // Frameworks are a live axis on the non-ESP stacks (M4) and on
-                    // esp-hal; show which ones this stack can actually generate,
-                    // and why the rest can't.
-                    if !s.frameworks.is_empty() {
-                        let available = s
-                            .frameworks
-                            .iter()
-                            .filter(|f| s.framework_gap(f).is_none())
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        println!("               frameworks: {available}");
-                        for f in s.frameworks {
-                            if let Some(reason) = s.framework_gap(f) {
-                                println!("                 {f}: [gap] {reason}");
-                            }
-                        }
-                    }
-                }
+                print!("{}", stacks_report(v));
             }
             None => eprintln!("unknown chip '{id}' (see --list-chips)"),
         },
@@ -583,5 +604,55 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.contains("--std conflicts"), "got: {err}");
+    }
+
+    // ---- --list-stacks per-stack flashing/logging support lines ----
+
+    #[test]
+    fn stacks_report_lists_the_supported_flashing_and_logging_subset() {
+        // rp2040 flashes with picotool/probe-rs and logs none/defmt — the
+        // per-stack SUPPORTED subset, not the universal catalog. The ESP-only
+        // catalog entries (espflash, the `log` frontend) must never leak in.
+        let report = stacks_report(registry::variant("xiao-rp2040").unwrap());
+        assert!(report.contains("flashing: picotool, probe-rs"), "got:\n{report}");
+        assert!(report.contains("logging: none, defmt"), "got:\n{report}");
+        assert!(!report.contains("espflash"), "espflash is ESP-only:\n{report}");
+        assert!(!report.contains("logging: none, log, defmt"), "`log` is ESP-only:\n{report}");
+    }
+
+    #[test]
+    fn stacks_report_flashing_logging_lines_are_the_registry_support_lists() {
+        // Every printed line is exactly Stack::flashing/logging joined — the
+        // data the matrix harness harvests each stack's axes from.
+        for v in registry::VARIANTS {
+            let report = stacks_report(v);
+            for s in v.stacks {
+                if !s.flashing.is_empty() {
+                    assert!(
+                        report.contains(&format!("flashing: {}", s.flashing.join(", "))),
+                        "{}/{} flashing line missing:\n{report}", v.id, s.id
+                    );
+                }
+                if !s.logging.is_empty() {
+                    assert!(
+                        report.contains(&format!("logging: {}", s.logging.join(", "))),
+                        "{}/{} logging line missing:\n{report}", v.id, s.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stacks_report_omits_the_axes_where_support_is_empty() {
+        // esp-idf fixes the toolchain (empty support), so it prints no
+        // flashing/logging line — exactly one line per supporting stack, the
+        // signal that the axis is not a live choice there.
+        let v = registry::variant("xiao-esp32c3").unwrap();
+        let report = stacks_report(v);
+        assert!(report.contains("flashing: espflash, probe-rs"), "esp-hal shows them:\n{report}");
+        let expected = v.stacks.iter().filter(|s| !s.flashing.is_empty()).count();
+        assert_eq!(report.matches("flashing: ").count(), expected, "one per stack:\n{report}");
+        assert!(v.stack("esp-idf").unwrap().flashing.is_empty(), "esp-idf support is empty");
     }
 }

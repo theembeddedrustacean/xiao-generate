@@ -1076,6 +1076,11 @@ fn list_stacks_reports_non_esp_frameworks_and_gaps() {
     assert!(s.contains("thumbv6m-none-eabi"), "{s}");
     // embassy is a gap on the blocking HAL and available on the embassy HAL.
     assert!(s.contains("[gap]"), "the blocking stack should show its embassy gap:\n{s}");
+    // The per-stack flashing/logging support subset is reported (so the matrix
+    // harness enumerates each stack's axes from here, not the universal catalog).
+    assert!(s.contains("flashing: picotool, probe-rs"), "rp2040 flashing subset:\n{s}");
+    assert!(s.contains("logging: none, defmt"), "rp2040 logging subset:\n{s}");
+    assert!(!s.contains("espflash"), "espflash is not an rp2040 flash tool:\n{s}");
 }
 
 /// THE M4 COMPILE GATE. Generates each supported cell and builds it for its ARM

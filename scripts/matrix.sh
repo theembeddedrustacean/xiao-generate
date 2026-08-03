@@ -12,11 +12,26 @@
 # bootloader.
 #
 # THE MATRIX IS NOT HARDCODED. Every axis is harvested at run time from the
-# tool's own `--list-chips` / `--list-stacks` / `--list-templates` output, plus
-# two read-only probes that make xiao-generate print its own catalogs
-# (`--flashing __probe__` -> "Available: espflash, probe-rs"). Add a variant,
-# a stack, a template or a catalog entry to src/registry.rs and this script
-# picks it up with no edit.
+# tool's own `--list-chips` / `--list-stacks` / `--list-templates` output. Each
+# stack's flashing/logging/framework axes come from its OWN `--list-stacks`
+# lines (the per-stack SUPPORTED subset, e.g. rp2040 flashing = picotool,
+# probe-rs) -- never the universal catalog -- so an unsupported tool for a stack
+# is never enumerated, only the real gaps are. Add a variant, a stack, a
+# template or a support entry to src/registry.rs and this script picks it up
+# with no edit.
+#
+# Two axes are deliberately NOT swept, because sweeping them would rebuild
+# byte-identical projects rather than test anything new:
+#   * FLASHING is a code-affecting axis ONLY on esp-hal (there it maps to
+#     different esp-generate `-o` flags). On every other stack the flashing
+#     choice changes only the summary/prereqs, so we build the stack's DEFAULT
+#     flashing tool once. LOGGING (defmt vs none) changes generation everywhere
+#     and is always swept.
+#   * A base template (base-blink/base-hello) on two variants that share the
+#     same silicon (e.g. xiao-esp32s3 & xiao-esp32s3-sense) is byte-identical --
+#     only the onboard components differ. The base is enumerated ONCE per
+#     silicon under a representative variant, tagged `<chip>(+sense)`; the
+#     sense-only component templates still enumerate under their own variant.
 #
 # Status vocabulary (one per row):
 #   PASS    generated AND `cargo build --release` succeeded
@@ -215,30 +230,40 @@ _tool_line "uf2conv.py (bin->UF2)"          "$HAVE_UF2CONV"      "curl -LO https
 # ---------------------------------------------------------------------------
 # 2. harvest the registry from the tool's own output
 # ---------------------------------------------------------------------------
-CHIPS=$(xg --list-chips | awk '/^  xiao-/ {print $1}')
-[ -n "$CHIPS" ] || { say "${C_RED}error: --list-chips produced no variants${C_OFF}"; exit 1; }
+# ALL_CHIPS is the whole registry (before any --chip filter); it is what tells
+# the silicon-fold whether a variant has a twin, so `<chip>(+sense)` still shows
+# even when the run is filtered to the base variant alone.
+ALL_CHIPS=$(xg --list-chips | awk '/^  xiao-/ {print $1}')
+[ -n "$ALL_CHIPS" ] || { say "${C_RED}error: --list-chips produced no variants${C_OFF}"; exit 1; }
+CHIPS=$ALL_CHIPS
 
 if [ -n "$ONLY_CHIP" ]; then
-  if ! printf '%s\n' "$CHIPS" | grep -qx -- "$ONLY_CHIP"; then
+  if ! printf '%s\n' "$ALL_CHIPS" | grep -qx -- "$ONLY_CHIP"; then
     say "${C_RED}error: unknown chip '$ONLY_CHIP'${C_OFF}"
-    say "known chips:"; printf '  %s\n' $CHIPS
+    say "known chips:"; printf '  %s\n' $ALL_CHIPS
     exit 2
   fi
   CHIPS=$ONLY_CHIP
 fi
 
-# stacks_of <chip> -> lines: "<stack>\t<target>\t<fw1,fw2,...>"
-# frameworks = the stack's whole support list (available ones from the
-# "frameworks:" line UNION the ones listed as "<fw>: [gap] ..."). Empty when
-# FRAMEWORK is not a live axis for that stack (the esp-idf std stack).
+# stacks_of <chip> -> lines: "<stack>\t<target>\t<fws>\t<flashing>\t<logging>"
+# Each list is comma-separated with the FIRST id its default; harvested straight
+# from the stack's own `--list-stacks` lines (the per-stack SUPPORTED subset).
+#   frameworks = the "frameworks:" available list UNION the "<fw>: [gap] ..."
+#                entries (so gaps are still enumerated and gated).
+#   flashing / logging = the "flashing:"/"logging:" support lines verbatim.
+# All three are empty when the axis is not live for that stack (esp-idf std,
+# whose toolchain the template fixes -- it prints none of these lines).
 stacks_of() {
   xg --list-stacks --chip "$1" | awk '
-    /^  [^ ]/                 { if (id!="") emit(); id=$1; tgt=""; fws=""; next }
+    /^  [^ ]/                 { if (id!="") emit(); id=$1; tgt=""; fws=""; fl=""; lg=""; next }
     /^ +target: /             { tgt=$2; next }
     /^ +frameworks: /         { s=$0; sub(/^ +frameworks: /,"",s); gsub(/, /,",",s); fws=s; next }
+    /^ +flashing: /           { s=$0; sub(/^ +flashing: /,"",s); gsub(/, /,",",s); fl=s; next }
+    /^ +logging: /            { s=$0; sub(/^ +logging: /,"",s); gsub(/, /,",",s); lg=s; next }
     /^ +[a-z0-9_-]+: \[gap\]/ { f=$1; sub(/:$/,"",f); fws = (fws=="" ? f : fws "," f); next }
     END { if (id!="") emit() }
-    function emit() { printf "%s\t%s\t%s\n", id, tgt, fws }
+    function emit() { printf "%s\t%s\t%s\t%s\t%s\n", id, tgt, fws, fl, lg }
   '
 }
 
@@ -263,35 +288,19 @@ uferris_of() {
   '
 }
 
-# The universal FLASHING / LOGGING catalogs, straight out of the tool: feeding
-# it an impossible value makes it print the whole catalog. Harvested from a
-# stack where the axis is live (an ESP no_std stack); the same probe tells us
-# whether the axis is live at all for a given stack.
-# probe_catalog <chip> <stack> <flag>  -> catalog csv, or "" if not a live axis
-probe_catalog() {
-  local out
-  # NOTE: --out must be a *valid crate name*, because Config::resolve validates
-  # the output dir's final component BEFORE it ever looks at the toolchain
-  # catalogs -- a dotfile path here would make the probe report the wrong error.
-  # Nothing is ever created: the probe always exits 2 at config time.
-  out=$(xg --headless --chip "$1" --stack "$2" --"$3" __xg_probe__ \
-           --out "$WORK/probe_never_created" 2>&1 >/dev/null) || true
-  case "$out" in
-    *"unknown --$3 value"*)
-      printf '%s\n' "$out" | sed -e 's/.*Available: //' -e 's/, /,/g' ;;
-    *) printf '' ;;
-  esac
-}
-
 # ---------------------------------------------------------------------------
 # 3. enumerate the matrix
 # ---------------------------------------------------------------------------
-# row TSV: id  chip  stack  target  template  uferris  extra-args  note
+# row TSV: id  label  chip  stack  target  template  uferris  extra-args  note
+#   chip  = the real variant id, used to GENERATE (`--chip`) and to pick the
+#           flash route -- never folded.
+#   label = the display id, which is `chip` plus `(+sense)` when this row's base
+#           template also stands in for a same-silicon twin (the fold).
 ROW_N=0
-emit_row() { # chip stack target template uferris extra note
+emit_row() { # label chip stack target template uferris extra note
   ROW_N=$((ROW_N + 1))
-  printf 'row%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$ROW_N" "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$ROWS"
+  printf 'row%03d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$ROW_N" "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" >>"$ROWS"
 }
 
 # A "base" template is the implicit working project (base / base-blink /
@@ -304,9 +313,39 @@ is_base_template() {
   case "$1" in base|base-blink|base-hello) return 0 ;; *) return 1 ;; esac
 }
 
+# esp-hal is the one stack where the flashing choice changes the generated code
+# (it maps to esp-generate `-o` flags). Detected from the target triple exactly
+# as skip_reason() classifies backends: ESP no_std targets are riscv32*-none-elf
+# / xtensa-*-none-elf (esp-idf ends in -espidf; the non-ESP scaffolds are thumb*).
+is_esp_hal_target() {
+  case "$1" in riscv32*-none-elf|xtensa-*-none-elf) return 0 ;; *) return 1 ;; esac
+}
+
 hdr "-- enumerating the matrix --"
 for chip in $CHIPS; do
-  stacks_of "$chip" | while IFS=$'\t' read -r stack target fws; do
+  # --- silicon fold (dedup sense / non-sense base templates) ---
+  # Two variants that share silicon are named `<base>` and `<base>-<suffix>`
+  # (xiao-esp32s3 / xiao-esp32s3-sense), so a variant T folds into E exactly when
+  # T = "E-<suffix>". BASE templates are byte-identical across such a pair (same
+  # silicon; only onboard components differ), so only the representative -- the
+  # base id E present in this run -- emits them; a folded twin emits only its own
+  # component templates. `is_base_emitter` is 1 unless some OTHER in-run chip is
+  # our base id.
+  is_base_emitter=1
+  for other in $CHIPS; do
+    [ "$other" = "$chip" ] && continue
+    case "$chip" in "$other"-*) is_base_emitter=0; break ;; esac
+  done
+  # The `(+suffix)` tag lists the same-silicon twins this chip's base stands in
+  # for. Derived from the WHOLE registry (ALL_CHIPS), so it shows even when the
+  # run is filtered to the base variant alone -- that is the fold made visible.
+  fold_tag=""
+  for t in $ALL_CHIPS; do
+    case "$t" in "$chip"-*) fold_tag="$fold_tag+${t#"$chip"-}" ;; esac
+  done
+  if [ -n "$fold_tag" ]; then base_label="$chip($fold_tag)"; else base_label="$chip"; fi
+
+  stacks_of "$chip" | while IFS=$'\t' read -r stack target fws fl_sup lg_sup; do
     [ -n "$stack" ] || continue
 
     is_std=0
@@ -315,65 +354,77 @@ for chip in $CHIPS; do
       continue
     fi
 
-    fl_cat=$(probe_catalog "$chip" "$stack" flashing)
-    lg_cat=$(probe_catalog "$chip" "$stack" logging)
-
     # framework values for this stack (support list, gaps included)
     fw_list=$(printf '%s' "$fws" | tr ',' ' ')
     [ -n "$fw_list" ] || fw_list="-"     # "-" = do not pass --framework
+
+    # per-stack flashing/logging SUPPORT (first id = default), from --list-stacks
+    fl_all=$(printf '%s' "$fl_sup" | tr ',' ' ')
+    lg_all=$(printf '%s' "$lg_sup" | tr ',' ' ')
+    fl_default=$(printf '%s' "$fl_all" | awk '{print $1}')
+    lg_default=$(printf '%s' "$lg_all" | awk '{print $1}')
+
+    # FLASHING is a code-affecting sweep only on esp-hal; elsewhere it is a
+    # summary/prereq-only choice, so build the DEFAULT once. LOGGING changes
+    # generation (defmt vs none) everywhere, so it is swept on every stack.
+    esp_hal=0; is_esp_hal_target "$target" && esp_hal=1
 
     templates_of "$chip" "$stack" | while IFS=$'\t' read -r tmpl tstate; do
       [ -n "$tmpl" ] || continue
       note="-"
       [ "$tstate" = gap ] && note="template-gap"
 
-      if [ -n "$fl_cat" ] && [ -n "$lg_cat" ]; then
-        # esp-hal: FLASHING / LOGGING / FRAMEWORK are all live axes...
-        if is_base_template "$tmpl" && [ $OPTION_SWEEP = 1 ]; then
-          # ...but ONLY on a base project (model::option_groups_apply). Sweep
-          # the full cross product; the tool gates the illegal cells itself
-          # (e.g. probe-rs + log) with exit 2.
-          for fl in $(printf '%s' "$fl_cat" | tr ',' ' '); do
-            for lg in $(printf '%s' "$lg_cat" | tr ',' ' '); do
-              for fw in $fw_list; do
-                extra="--template $tmpl --flashing $fl --logging $lg"
-                [ "$fw" != "-" ] && extra="$extra --framework $fw"
-                emit_row "$chip" "$stack" "$target" "$tmpl" 0 "$extra" "$note"
-              done
+      if is_base_template "$tmpl"; then
+        # Fold: a base template rides on the representative variant only.
+        [ "$is_base_emitter" = 1 ] || continue
+
+        # flashing values to sweep
+        if [ $esp_hal = 1 ] && [ $OPTION_SWEEP = 1 ]; then
+          fl_vals="$fl_all"
+        else
+          fl_vals="$fl_default"
+        fi
+        # logging values to sweep
+        if [ $OPTION_SWEEP = 1 ]; then lg_vals="$lg_all"; else lg_vals="$lg_default"; fi
+        # esp-idf leaves both empty (axis not live) -> a single "-" placeholder
+        [ -n "$fl_vals" ] || fl_vals="-"
+        [ -n "$lg_vals" ] || lg_vals="-"
+
+        # The tool still gates illegal esp-hal cells (e.g. probe-rs + log) and
+        # real framework gaps (embassy-on-blocking-HAL, rtic) itself, with exit 2.
+        for fl in $fl_vals; do
+          for lg in $lg_vals; do
+            for fw in $fw_list; do
+              extra="--template $tmpl"
+              [ "$fl" != "-" ] && extra="$extra --flashing $fl"
+              [ "$lg" != "-" ] && extra="$extra --logging $lg"
+              [ "$fw" != "-" ] && extra="$extra --framework $fw"
+              emit_row "$base_label" "$chip" "$stack" "$target" "$tmpl" 0 "$extra" "$note"
             done
           done
-        elif is_base_template "$tmpl"; then
-          for fw in $fw_list; do
-            extra="--template $tmpl"
-            [ "$fw" != "-" ] && extra="$extra --framework $fw"
-            emit_row "$chip" "$stack" "$target" "$tmpl" 0 "$extra" "$note"
-          done
-        else
-          # An onboard-component add-on template pins its own esp-generate
-          # option set, so the three axes are locked and sweeping them would
-          # build the byte-identical project N times. One row.
-          emit_row "$chip" "$stack" "$target" "$tmpl" 0 "--template $tmpl" "$note"
-        fi
-      else
-        # non-ESP scaffold (FRAMEWORK live) or esp-idf std (nothing live).
-        for fw in $fw_list; do
-          extra="--template $tmpl"
-          [ "$fw" != "-" ] && extra="$extra --framework $fw"
-          emit_row "$chip" "$stack" "$target" "$tmpl" 0 "$extra" "$note"
         done
+      else
+        # An onboard-component add-on template pins its own option set (the three
+        # axes are locked), so it is one row -- and it belongs to THIS variant's
+        # silicon-specific components, so it is never folded onto a twin.
+        emit_row "$chip" "$chip" "$stack" "$target" "$tmpl" 0 "--template $tmpl" "$note"
       fi
     done
   done
 
-  # uFerris rows are a mode, not a template -- one per uferris-capable stack.
-  uf=$(uferris_of "$chip")
-  if [ -n "$uf" ]; then
-    ufnote="-"; [ "$uf" = gap ] && ufnote="uferris-gap"
-    stacks_of "$chip" | while IFS=$'\t' read -r stack target fws; do
-      [ -n "$stack" ] || continue
-      case "$target" in *-espidf) continue ;; esac   # uFerris is esp-hal only
-      emit_row "$chip" "$stack" "$target" "blinky(uferris)" 1 "--uferris" "$ufnote"
-    done
+  # uFerris rows are a base-like mode (not a component): identical across a
+  # silicon twin pair, so they fold onto the representative exactly like a base
+  # template. One row per uferris-capable stack.
+  if [ "$is_base_emitter" = 1 ]; then
+    uf=$(uferris_of "$chip")
+    if [ -n "$uf" ]; then
+      ufnote="-"; [ "$uf" = gap ] && ufnote="uferris-gap"
+      stacks_of "$chip" | while IFS=$'\t' read -r stack target fws fl_sup lg_sup; do
+        [ -n "$stack" ] || continue
+        case "$target" in *-espidf) continue ;; esac   # uFerris is esp-hal only
+        emit_row "$base_label" "$chip" "$stack" "$target" "blinky(uferris)" 1 "--uferris" "$ufnote"
+      done
+    fi
   fi
 done
 
@@ -387,7 +438,9 @@ fi
 
 if [ $LIST_ONLY = 1 ]; then
   hdr "-- matrix --"
-  awk -F'\t' '{printf "  %-7s %-21s %-11s %-16s %s\n", $1,$2,$3,$5,$7}' "$ROWS"
+  # columns: id  label  stack  template  extra   ($2 is the display label, $3 the
+  # real generation chip; the fold shows in $2 as `<chip>(+sense)`).
+  awk -F'\t' '{printf "  %-7s %-24s %-11s %-16s %s\n", $1,$2,$4,$6,$8}' "$ROWS"
   say ""
   say "work dir: $WORK"
   exit 0
@@ -503,10 +556,10 @@ run_build_mode() {
   hdr "-- build matrix ($TOTAL rows) --"
   dim "generating into $WORK/projects, building with a per-target shared CARGO_TARGET_DIR"
   local n=0
-  while IFS=$'\t' read -r id chip stack target tmpl uferris extra note; do
+  while IFS=$'\t' read -r id disp chip stack target tmpl uferris extra note; do
     n=$((n+1))
     local label
-    label=$(printf '[%d/%d] %-21s %-11s %s' "$n" "$TOTAL" "$chip" "$stack" "$(printf '%s' "$extra" | sed 's/--template //;s/--flashing /fl=/;s/--logging /lg=/;s/--framework /fw=/')")
+    label=$(printf '[%d/%d] %-24s %-11s %s' "$n" "$TOTAL" "$disp" "$stack" "$(printf '%s' "$extra" | sed 's/--template //;s/--flashing /fl=/;s/--logging /lg=/;s/--framework /fw=/')")
 
     local why
     why=$(skip_reason "$target" "$stack")
@@ -758,7 +811,7 @@ run_flash_mode() {
   pause_for "Connect ONE $ONLY_CHIP board now."
 
   local n=0
-  while IFS=$'\t' read -r id chip stack target tmpl uferris extra note; do
+  while IFS=$'\t' read -r id disp chip stack target tmpl uferris extra note; do
     n=$((n+1))
     local label
     label=$(printf '[%d/%d] %-11s %s' "$n" "$TOTAL" "$stack" "$(printf '%s' "$extra" | sed 's/--template //;s/--flashing /fl=/;s/--logging /lg=/;s/--framework /fw=/')")

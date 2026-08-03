@@ -15,6 +15,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
+use crate::backend::bootstrap::Consent;
 use crate::model::Config;
 use crate::registry::{
     CARGO_GENERATE_MIN_VERSION, ESP_IDF_TEMPLATE_GIT, ESP_IDF_TEMPLATE_REV, ESP_IDF_VERSION,
@@ -129,7 +130,10 @@ fn fetch_revision(url: &str, rev: &str) -> Result<TempDir> {
     Ok(dir)
 }
 
-pub fn scaffold(cfg: &Config) -> Result<()> {
+pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
+    // Install cargo-generate on demand (with consent) if it is missing.
+    crate::backend::bootstrap::ensure_cargo_generate(consent)?;
+
     let _installed = preflight()?;
 
     // Pinned revision first, then expand it from disk. `cargo generate --path

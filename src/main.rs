@@ -129,7 +129,7 @@ fn run() -> i32 {
                 eprintln!("error: --name <name> is required to launch the interactive TUI");
                 return 2;
             };
-            run_tui(name)
+            run_tui(name, backend::Consent::from_flags(args.yes, args.no_install))
         }
         Mode::Headless => run_headless(&args),
     }
@@ -153,7 +153,7 @@ fn run_headless(args: &Cli) -> i32 {
             return 2;
         }
     };
-    generate(&cfg)
+    generate(&cfg, backend::Consent::from_flags(args.yes, args.no_install))
 }
 
 /// `--check`: resolve the config exactly as headless generation would, then print
@@ -187,9 +187,9 @@ fn run_check(args: &Cli) -> i32 {
 /// Interactive path: the TUI builds a resolved `Config` from the same
 /// `Config::resolve_for_tui` validation and the passed-in `name`, then hands it
 /// back for generation on the SAME code path as the headless flow.
-fn run_tui(name: String) -> i32 {
+fn run_tui(name: String, consent: backend::Consent) -> i32 {
     match tui::launch(name) {
-        Ok(tui::Outcome::Generate(cfg)) => generate(&cfg),
+        Ok(tui::Outcome::Generate(cfg)) => generate(&cfg, consent),
         Ok(tui::Outcome::Gated(msg)) => {
             // Non-ESP (M4/M6) selection: nothing generated, but not an error.
             println!("{msg}");
@@ -204,8 +204,8 @@ fn run_tui(name: String) -> i32 {
 }
 
 /// The single generation path shared by both modes: scaffold + patch + summary.
-fn generate(cfg: &Config) -> i32 {
-    if let Err(e) = backend::scaffold(cfg) {
+fn generate(cfg: &Config, consent: backend::Consent) -> i32 {
+    if let Err(e) = backend::scaffold(cfg, consent) {
         eprintln!("error: {e:#}");
         return 1;
     }

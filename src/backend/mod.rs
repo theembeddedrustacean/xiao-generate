@@ -9,16 +9,22 @@ use crate::model::Config;
 use crate::registry::Backend;
 use crate::templates;
 
+pub mod bootstrap;
 pub mod cargogen;
 pub mod espgen;
 pub mod nonesp;
 
+pub use bootstrap::Consent;
+
 /// Produce the vanilla backend scaffold for `cfg` at `cfg.out_dir`. The backend
 /// is a function of the resolved `(variant, stack)` (D6), not the variant alone.
-pub fn scaffold(cfg: &Config) -> Result<()> {
+///
+/// `consent` governs how a missing ESP backend generator is handled — the
+/// non-ESP scaffold has no external generator, so it ignores it.
+pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
     match cfg.stack.backend {
-        Backend::EspGenerate => espgen::scaffold(cfg)?,
-        Backend::CargoGenerate => cargogen::scaffold(cfg)?,
+        Backend::EspGenerate => espgen::scaffold(cfg, consent)?,
+        Backend::CargoGenerate => cargogen::scaffold(cfg, consent)?,
         Backend::NonEspScaffold => nonesp::scaffold(cfg)?,
     }
     write_editor_config(cfg)?;

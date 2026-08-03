@@ -27,17 +27,26 @@ cargo install xiao-generate      # from crates.io
 cargo install --path .
 ```
 
-`xiao-generate` shells out to a pinned upstream generator for the two ESP stacks,
-so install the one for the stack you plan to use:
+That is the only install command. The two ESP stacks shell out to a pinned
+upstream generator (`esp-generate` for `no_std`, `cargo-generate` for `std`), and
+`xiao-generate` installs the one it needs **on demand, the first time you
+generate an ESP project** — it checks on every run, and if the backend is
+missing it asks before installing:
 
-| Stack you want | Also install |
-| --- | --- |
-| ESP `no_std` (`esp-hal`) | `cargo install esp-generate --version 1.3.0 --locked` |
-| ESP `std` (`esp-idf`) | `cargo install cargo-generate` (plus `git` on `PATH`) |
-| Everything non-ESP | nothing — the Cortex-M project is written directly |
+```
+esp-generate is required for this stack but isn't installed.
+  install it now with `cargo install esp-generate --version 1.3.0 --locked`? [Y/n]
+```
 
-These are `xiao-generate`'s own dependencies. The prerequisites for the
-*generated project* are a separate list — see [Prerequisites](#prerequisites).
+- Answer `y` (or just Enter) and it installs the pinned version and continues.
+- `--yes` / `-y` installs without asking (for scripts and CI).
+- `--no-install` never installs — it prints the `cargo install` command and stops,
+  so you can run it yourself.
+
+Non-ESP boards need no backend at all (the Cortex-M project is written directly),
+so none of this applies to them. These backends are `xiao-generate`'s own
+dependencies; the prerequisites for the *generated project* are a separate list —
+see [Prerequisites](#prerequisites).
 
 ---
 

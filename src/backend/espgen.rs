@@ -8,6 +8,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+use crate::backend::bootstrap::{self, Consent};
 use crate::model::Config;
 use crate::registry::{self, ESP_GENERATE_VERSION};
 
@@ -35,7 +36,10 @@ pub fn preflight() -> Result<String> {
     Ok(ver)
 }
 
-pub fn scaffold(cfg: &Config) -> Result<()> {
+pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
+    // Install the pinned esp-generate on demand (with consent) if it is missing.
+    bootstrap::ensure_esp_generate(consent)?;
+
     let installed = preflight()?;
     if installed != ESP_GENERATE_VERSION {
         // Not fatal, but the snapshots/pins are validated against the pin.

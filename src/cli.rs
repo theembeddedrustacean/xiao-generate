@@ -139,4 +139,15 @@ pub struct Cli {
     /// List supported stacks (optionally filtered by --chip) and exit.
     #[arg(long)]
     pub list_stacks: bool,
+
+    /// Install a missing ESP backend generator (esp-generate / cargo-generate)
+    /// without prompting. By default xiao-generate asks first; this answers yes.
+    /// Only the ESP stacks need a backend — non-ESP boards ignore it.
+    #[arg(long = "yes", short = 'y', conflicts_with = "no_install")]
+    pub yes: bool,
+
+    /// Never auto-install a missing ESP backend generator — print the manual
+    /// `cargo install` command and stop instead.
+    #[arg(long = "no-install")]
+    pub no_install: bool,
 }

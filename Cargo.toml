@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.82"
 description = "Project generator for Seeed XIAO devices"
 license = "MIT OR Apache-2.0"
-keywords = ["xiao", "embedded", "esp32", "generator", "no_std"]
+keywords = ["xiao", "embedded", "generator", "no_std", "template"]
 categories = ["command-line-utilities", "embedded", "development-tools"]
 repository = "https://github.com/theembeddedrustacean/xiao-generate"
 

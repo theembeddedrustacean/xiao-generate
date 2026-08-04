@@ -25,7 +25,7 @@ Afterward, there are two modes, and they resolve the same configuration through 
 
 ### Interactive TUI
 
-This is the simplest and recommended path. Everytime you want to generate a new project, navigate to the folder path you want the projec created and enter the following command:
+This is the simplest and recommended path. Every time you want to generate a new project, navigate to the folder path where you want the project created in and enter the following command:
 
 ```sh
 xiao-generate --name my-project

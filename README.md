@@ -101,17 +101,6 @@ Inspect what a board supports without generating: `--list-chips`,
 | `xiao-nrf52840-sense` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
 | `xiao-samd21` | Cortex-M0+ | `atsamd-hal` | `thumbv6m-none-eabi` |
 
-The µFerris BSP mode (ESP32-C3 / C6 first) is planned but not supported yet.
-
-The HAL axis and the framework axis are orthogonal: an embassy HAL builds fine
-with `--framework none`, and `--framework embassy` requires an embassy HAL (a
-blocking HAL has no `embassy-time` driver, so it is refused with that reason).
-
-Onboard-component templates beyond the base project are available where there is
-a compile-verified body: `camera-snapshot` and `sd-list` on the S3 Sense.
-`mic-capture`, `rgb-led` and `imu-read` are declared gaps — run
-`--list-templates --chip <chip>` for the current state and the reason.
-
 ---
 
 ## Prerequisites

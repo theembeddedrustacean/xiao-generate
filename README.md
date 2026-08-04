@@ -3,18 +3,18 @@
 [![crates.io](https://img.shields.io/crates/v/xiao-generate.svg)](https://crates.io/crates/xiao-generate)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licence)
 
-Generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
+A Cargo tool to generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
 line of SoCs & modules.
 
-At present, this tool supports ten XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs. (A
-[µFerris](https://crates.io/crates/uferris-bsp) BSP mode for the ESP RISC-V parts is planned but not supported yet.)
+At present, this tool supports ten XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs.
 
 Supported variants: the XIAO-ESP32-C3/C5/C6/S3 (and S3 Sense), XIAO-RP2040, XIAO-RP2350, XIAO-nRF52840 (and Sense), and XIAO-SAMD21. Support for additional devices will be added as they become available.
 
-
 ## Quickstart
 
-To generate a template you first need to install `xiao-generate`:
+Make sure you have Rust and its tools installed. If not, follow [these instructions](https://rust-lang.org/tools/install/). 
+
+To generate a template, you first need to install `xiao-generate`:
 
 ```sh
 cargo install xiao-generate
@@ -83,9 +83,6 @@ Inspect what a board supports without generating: `--list-chips`,
 `--check --chip <id>` (reports the host prerequisites for that project).
 
 
-
-
-
 ## Supported devices
 
 | Variant | Arch | Stacks (first = default) | Target |
@@ -101,31 +98,16 @@ Inspect what a board supports without generating: `--list-chips`,
 | `xiao-nrf52840-sense` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
 | `xiao-samd21` | Cortex-M0+ | `atsamd-hal` | `thumbv6m-none-eabi` |
 
----
+
 
 ## Prerequisites
 
-For everything except ESP-IDF `std` development, **you don't install anything by
-hand.** `xiao-generate` works out exactly what each project needs — the right
-Rust target and a flash tool — and every one of those installs with `cargo
-install` or `rustup`. It installs its own ESP backends on first use, and after
-generating it reports each prerequisite with a live ✔/✗ and **offers to install
-the missing ones for you** — all with a simple `[Y/n]` prompt (`--yes` installs
-without asking, `--no-install` just prints the commands). `xiao-generate --check
---chip <chip>` reports the same without generating.
+For everything except ESP-IDF `std` development, `xiao-generate` works out exactly what each project needs. This includes the Rust target and a flash tool. Every one of those installs either with `cargo
+install` or `rustup`. `xiao-generate` prompts the user for approval and installs any needed tools on first use to avoid bloat.
 
-The **one exception is ESP-IDF (`std`) development**. That toolchain — the C
-ESP-IDF SDK and its per-OS system packages — is set up outside this tool and
-differs by operating system, so it's documented upstream:
-[esp-idf-template → Prerequisites](https://github.com/esp-rs/esp-idf-template#prerequisites)
-and the [Rust on ESP Book](https://esp-rs.github.io/book/). (The first `--std`
-build then compiles the whole ESP-IDF SDK, so expect it to be slow.)
+The **one exception is ESP-IDF (`std`) development**. That toolchain requires the C ESP-IDF SDK and differs by operating system. Installation instructions are documented upstream in the 
+[esp-idf-template repo](https://github.com/esp-rs/esp-idf-template#prerequisites). Note that the first '-- std ' build also compiles the whole ESP-IDF SDK, so expect it to be slow.
 
-**Enter the bootloader before flashing** — ESP: just plug in USB-C. RP2040 /
-RP2350: hold **B** while plugging in. nRF52840: double-tap **RESET**. SAMD21:
-short the two **RST** pads twice.
-
----
 
 ## After generating
 
@@ -161,19 +143,6 @@ Next steps:
 Every `✔` and `✗` there is a live probe of your machine, not a static list — the
 report above is from a host that has the Rust target installed but not
 `uf2deploy`, and only the missing one is given an install command.
-
-## Editor support
-
-Every generated project ships a project-level `rust-analyzer.toml` that
-suppresses the spurious `E0463: can't find crate for test` you would otherwise
-get on a bare-metal target — this is always written, whatever `--editor` you
-pick.
-
-Editor-specific client config is opt-in. The default is `--editor none`, which
-writes no editor files; pass `--editor vscode`, `helix`, `neovim`, or `zed` to
-also drop that editor's settings into the project (the client config is the part
-actually verified to clear the diagnostic in-editor, as the `.toml` alone does
-not in current rust-analyzer).
 
 ## Licence
 

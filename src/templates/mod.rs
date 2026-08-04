@@ -33,6 +33,16 @@ pub fn nonesp_base_body(chip: &str, stack_id: &str, framework: &str) -> Option<&
         // the RP2350 IMAGE_DEF itself, so only the Cargo feature differs).
         (_, "embassy-rp", "none") => include_str!("files/nonesp/embassy_rp_blink_bare.rs.tmpl"),
         (_, "embassy-rp", "embassy") => include_str!("files/nonesp/embassy_rp_blink.rs.tmpl"),
+        // nRF54L15 shares the `embassy-nrf` stack id with the nRF52840 but needs its
+        // own body: the LED is on a different GPIO PORT (P2.00, not P0.xx), and the
+        // port lives in the pin literal — so these chip-specific arms MUST precede
+        // the nRF52840 wildcard arms below.
+        ("nrf54l15", "embassy-nrf", "none") => {
+            include_str!("files/nonesp/embassy_nrf54l_blink_bare.rs.tmpl")
+        }
+        ("nrf54l15", "embassy-nrf", "embassy") => {
+            include_str!("files/nonesp/embassy_nrf54l_blink.rs.tmpl")
+        }
         (_, "embassy-nrf", "none") => include_str!("files/nonesp/embassy_nrf_blink_bare.rs.tmpl"),
         (_, "embassy-nrf", "embassy") => include_str!("files/nonesp/embassy_nrf_blink.rs.tmpl"),
         _ => return None,
@@ -46,6 +56,7 @@ pub fn memory_x(id: &str) -> Option<&'static str> {
         "rp2040-embassy" => include_str!("files/memory_rp2040_embassy.x"),
         "rp2350" => include_str!("files/memory_rp2350.x"),
         "nrf52840" => include_str!("files/memory_nrf52840.x"),
+        "nrf54l15" => include_str!("files/memory_nrf54l15.x"),
         _ => return None,
     })
 }

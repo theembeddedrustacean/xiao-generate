@@ -1,0 +1,29 @@
+//! Blink the XIAO nRF54L15's onboard user LED with the `embassy-nrf` HAL and NO
+//! async executor (`--framework none`).
+//!
+//! The embassy HAL is usable on its own: `embassy_nrf::init()` works outside any
+//! executor, `Output` is a blocking GPIO type, and the `rt` feature (not the
+//! executor) supplies the vector table. Because there is no `embassy-time` in the
+//! graph, the project must NOT enable embassy-nrf's `time-driver-grtc`/`time`
+//! features — mirrors the nRF52840 bare body. The GPIO PORT (2) is baked into the
+//! pin literal (`p.P2_00`), like the nRF52840 body's `P0_`.
+#![no_std]
+#![no_main]
+
+use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use panic_halt as _;
+
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    let p = embassy_nrf::init(Default::default());
+
+    // XIAO nRF54L15 onboard user LED on P2.00 (active-low -> Level::High is off).
+    let mut led = Output::new(p.P2_00, Level::{{LED_INIT_LEVEL}}, OutputDrive::Standard);
+
+    loop {
+        led.set_low();
+        cortex_m::asm::delay(32_000_000);
+        led.set_high();
+        cortex_m::asm::delay(32_000_000);
+    }
+}

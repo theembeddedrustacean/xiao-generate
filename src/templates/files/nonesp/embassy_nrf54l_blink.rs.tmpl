@@ -1,0 +1,32 @@
+//! Blink the XIAO nRF54L15's onboard user LED with `embassy-nrf` + the embassy
+//! executor (`--framework embassy`).
+//!
+//! Source: embassy-rs/embassy `examples/nrf54l15-app/src/bin/blinky.rs`, with the
+//! LED moved from the DK's `P2_09` to the XIAO's `P2_00`, and the upstream
+//! defmt/panic-probe dropped for this project's convention: panic-halt plus
+//! opt-in defmt (wired only under `--logging defmt`), exactly like the nRF52840
+//! embassy body. The GPIO PORT (2) lives in the pin literal here (`p.P2_00`) —
+//! the same place the nRF52840 body bakes in `P0_` — so it is never assembled
+//! from the registry LED number.
+#![no_std]
+#![no_main]
+
+use embassy_executor::Spawner;
+use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_time::Timer;
+use panic_halt as _;
+
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_nrf::init(Default::default());
+
+    // XIAO nRF54L15 onboard user LED on P2.00 (active-low -> Level::High is off).
+    let mut led = Output::new(p.P2_00, Level::{{LED_INIT_LEVEL}}, OutputDrive::Standard);
+
+    loop {
+        led.set_low();
+        Timer::after_millis(500).await;
+        led.set_high();
+        Timer::after_millis(500).await;
+    }
+}

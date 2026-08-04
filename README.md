@@ -6,9 +6,9 @@
 A Cargo tool to generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
 line of SoCs & modules.
 
-At present, this tool supports ten XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs.
+At present, this tool supports eleven XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs.
 
-Supported variants: the XIAO-ESP32-C3/C5/C6/S3 (and S3 Sense), XIAO-RP2040, XIAO-RP2350, XIAO-nRF52840 (and Sense), and XIAO-SAMD21. Support for additional devices will be added as they become available.
+Supported variants: the XIAO-ESP32-C3/C5/C6/S3 (and S3 Sense), XIAO-RP2040, XIAO-RP2350, XIAO-nRF52840 (and Sense), XIAO-nRF54L15, and XIAO-SAMD21. Support for additional devices will be added as they become available.
 
 ## Quickstart
 
@@ -96,6 +96,7 @@ Inspect what a board supports without generating: `--list-chips`,
 | `xiao-rp2350` | Cortex-M33 | `rp235x-hal`, `embassy-rp` | `thumbv8m.main-none-eabihf` |
 | `xiao-nrf52840` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
 | `xiao-nrf52840-sense` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
+| `xiao-nrf54l15` | Cortex-M33 | `embassy-nrf` | `thumbv8m.main-none-eabihf` |
 | `xiao-samd21` | Cortex-M0+ | `atsamd-hal` | `thumbv6m-none-eabi` |
 
 

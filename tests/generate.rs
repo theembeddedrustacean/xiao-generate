@@ -420,6 +420,11 @@ const NON_ESP_CELLS: &[(&str, &str, &str, &str)] = &[
     ("xiao-nrf52840-sense", "nrf-hal", "none", "thumbv7em-none-eabihf"),
     ("xiao-nrf52840-sense", "embassy-nrf", "none", "thumbv7em-none-eabihf"),
     ("xiao-nrf52840-sense", "embassy-nrf", "embassy", "thumbv7em-none-eabihf"),
+    // nRF54L15 (Cortex-M33): embassy-nrf only, both framework bodies. Its flat
+    // 0x0/RRAM layout is deliberately excluded from the nRF52840 brick-guard
+    // (which filters on the `xiao-nrf52840` prefix) — this part has no bootloader.
+    ("xiao-nrf54l15", "embassy-nrf", "none", "thumbv8m.main-none-eabihf"),
+    ("xiao-nrf54l15", "embassy-nrf", "embassy", "thumbv8m.main-none-eabihf"),
     ("xiao-samd21", "atsamd-hal", "none", "thumbv6m-none-eabi"),
 ];
 

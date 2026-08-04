@@ -876,7 +876,7 @@ pub const PREREQS: &[Prereq] = &[
         // library.
         install: "cargo install probe-rs-tools --locked",
         need: Need::Flash,
-        note: Some("needs an SWD debug probe attached — espflash/UF2 need only the USB-C cable"),
+        note: Some("needs a debug probe — built-in on ESP and the XIAO nRF54L15, an external SWD probe on the other Cortex-M boards"),
     },
     Prereq {
         id: "elf2uf2-rs",
@@ -955,6 +955,12 @@ const IDF_NONE: &[&str] = &[];
 const RP_FLASHING: &[&str] = &["elf2uf2-rs", "uf2deploy", "probe-rs"];
 const NRF_FLASHING: &[&str] = &["uf2deploy", "probe-rs"];
 const SAMD_FLASHING: &[&str] = &["hf2", "uf2deploy", "probe-rs"];
+/// XIAO nRF54L15: the board's onboard SAMD11 CMSIS-DAP debugger (over its USB-C
+/// port) makes `probe-rs run --chip nrf54l15` the no-external-hardware route — and
+/// the ONLY one. The nRF54L15 has no UF2 bootloader, so there is no uf2deploy/UF2
+/// route and no UF2 family id. probe-rs leads (and is the sole choice); its
+/// external-probe note is suppressed because the stack sets `builtin_debug`.
+const NRF54L_FLASHING: &[&str] = &["probe-rs"];
 const ARM_LOGGING: &[&str] = &["none", "defmt"];
 const RP_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
 const NRF_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
@@ -1209,6 +1215,18 @@ const RP2350_RUSTFLAGS: &[&str] = &[
     "-C",
     "target-cpu=cortex-m33",
 ];
+/// nRF54L15 is a Cortex-M33 (+FPU) part on the same `thumbv8m.main-none-eabihf`
+/// target as the RP2350: the standard `--nmagic` + `link.x` pair plus the M33 CPU
+/// model select. Identical in content to `RP2350_RUSTFLAGS`; named separately so
+/// each stack's link flags read for themselves.
+const NRF54L_RUSTFLAGS: &[&str] = &[
+    "-C",
+    "link-arg=--nmagic",
+    "-C",
+    "link-arg=-Tlink.x",
+    "-C",
+    "target-cpu=cortex-m33",
+];
 /// embassy-rp on RP2040 gets its link args from `build.rs` instead, because
 /// `-Tlink-rp.x` (embassy-rp's own boot2 script) is emitted into `OUT_DIR` by
 /// embassy-rp's build script and must follow `link.x` in bin-only link order.
@@ -1314,6 +1332,28 @@ const EMBASSY_NRF_SCAFFOLD: Scaffold = Scaffold {
     base_deps: EMBASSY_NRF_DEPS,
     rustflags: ARM_RUSTFLAGS,
     memory_x: Some("nrf52840"),
+    link_args: NO_LINK_ARGS,
+    framework_gaps: &[RTIC_GAP],
+};
+/// XIAO nRF54L15 — `embassy-nrf` only (blocking `nrf-hal` does not support the
+/// nRF54 family, so there is no second stack). One embassy HAL exposing both the
+/// blocking (`framework = none`) and async (`framework = embassy`) bodies, exactly
+/// like the nRF52840 `embassy-nrf` stack. Reuses the shared embassy-nrf/executor
+/// pins (`EMBASSY_NRF_VERSION` = 0.11 carries the `nrf54l15-app-s` chip feature;
+/// `EMBASSY_FRAMEWORK_DEPS` supplies executor 0.10 + embassy-time 0.5.1) and the
+/// project's panic-halt + opt-in-defmt convention — NOT the upstream example's
+/// always-on defmt/panic-probe. The chip-select + `rt` + `unstable-pac` are always
+/// on; the embassy-time driver (`time-driver-grtc`/`time`) and `gpiote` come in
+/// only under `framework = embassy`, so the bare body drags in no time stack (same
+/// split as the nRF52840 embassy scaffold). Cortex-M33, thumbv8m.main-none-eabihf.
+const EMBASSY_NRF54L_SCAFFOLD: Scaffold = Scaffold {
+    hal_crate: "embassy-nrf",
+    hal_version: EMBASSY_NRF_VERSION,
+    hal_features: &["nrf54l15-app-s", "rt", "unstable-pac"],
+    embassy_hal_features: &["time-driver-grtc", "gpiote", "time"],
+    base_deps: EMBASSY_NRF_DEPS,
+    rustflags: NRF54L_RUSTFLAGS,
+    memory_x: Some("nrf54l15"),
     link_args: NO_LINK_ARGS,
     framework_gaps: &[RTIC_GAP],
 };
@@ -1706,6 +1746,45 @@ pub const VARIANTS: &[Variant] = &[
                 flash_prereqs: NO_PREREQS,
             },
         ],
+        uferris_chip_feature: None,
+        uferris_gap: None,
+        default_crates: &[],
+    },
+    Variant {
+        id: "xiao-nrf54l15",
+        display: "XIAO nRF54L15",
+        priority: 1,
+        chip: "nrf54l15",
+        arch: Arch::Arm,
+        // Onboard user LED on P2.00, active-low. The GPIO PORT (2) is baked into
+        // the chip-specific embassy-nrf54l body's pin literal (`p.P2_00`) — the
+        // same place the nRF52840 bodies encode their `P0_` port — so `gpio`/
+        // `active_low` only drive the OFF init level (`{{LED_INIT_LEVEL}}`), and
+        // the pin string itself is not assembled from this number.
+        led: Some(Led { gpio: 0, active_low: Some(true) }),
+        // embassy-nrf ONLY: the blocking nrf-hal does not support the nRF54 family,
+        // so there is a single stack whose framework axis gives none (blocking) and
+        // embassy (async) — the HAL⟂framework model, exactly like the nRF52840
+        // embassy-nrf stack.
+        stacks: &[Stack {
+            id: "embassy-nrf",
+            display: EMBASSY_NRF_DISPLAY,
+            backend: Backend::NonEspScaffold,
+            target: "thumbv8m.main-none-eabihf",
+            templates: NON_ESP_BASE_ONLY,
+            uferris: false,
+            flashing: NRF54L_FLASHING,
+            logging: ARM_LOGGING,
+            frameworks: NRF_FRAMEWORKS,
+            scaffold: Some(&EMBASSY_NRF54L_SCAFFOLD),
+            // First Cortex-M board with a built-in debug interface: the onboard
+            // SAMD11 CMSIS-DAP over USB-C is the board's own probe, so probe-rs
+            // needs no EXTERNAL probe here (the "needs an external debug probe"
+            // note is suppressed, like the ESP parts' USB-Serial-JTAG).
+            builtin_debug: true,
+            build_prereqs: NO_PREREQS,
+            flash_prereqs: NO_PREREQS,
+        }],
         uferris_chip_feature: None,
         uferris_gap: None,
         default_crates: &[],
@@ -2115,22 +2194,35 @@ mod tests {
         assert_eq!(samd.support(ToolCategory::Framework), &["none", "rtic"]);
     }
 
-    /// `builtin_debug` is set exactly on the ESP stacks (built-in USB-Serial-JTAG),
-    /// and every non-ESP flashing default is a no-probe route — so the
-    /// "needs an external debug probe" note only ever fires for probe-rs off ESP.
+    /// `builtin_debug` marks a chip that is its own debug probe over USB-C: the ESP
+    /// parts' USB-Serial-JTAG, and the XIAO nRF54L15's onboard SAMD11 CMSIS-DAP.
+    /// Every ESP stack has it; among the non-ESP stacks only the nRF54L15 does. A
+    /// stack's default flash route needs an EXTERNAL probe only when it is a
+    /// probe-rs default with no built-in debugger — which the registry never has —
+    /// so the "needs an external debug probe" note only ever fires for a probe-rs
+    /// choice on a board without `builtin_debug`.
     #[test]
     fn builtin_debug_and_default_flash_routes_are_grounded() {
         for v in VARIANTS {
             for s in v.stacks {
-                assert_eq!(
-                    s.builtin_debug,
-                    s.backend.is_esp(),
-                    "{}/{}: builtin_debug must track the ESP parts", v.id, s.id
-                );
-                // On every stack that lists flashing support, the default is a
-                // no-probe route (never probe-rs).
-                if let Some(def) = s.default_tool(ToolCategory::Flashing) {
-                    assert!(!def.needs_probe, "{}/{}: default flash route needs a probe", v.id, s.id);
+                // ESP is always its own probe.
+                if s.backend.is_esp() {
+                    assert!(s.builtin_debug, "{}/{}: ESP parts have built-in debug", v.id, s.id);
+                }
+                match s.default_tool(ToolCategory::Flashing) {
+                    // A probe-rs default is only legitimate when the chip carries
+                    // its own debugger (nRF54L15); otherwise the out-of-the-box
+                    // default must be a no-probe USB/UF2 route.
+                    Some(def) if def.needs_probe => assert!(
+                        s.builtin_debug,
+                        "{}/{}: a probe-rs default needs an onboard debugger", v.id, s.id
+                    ),
+                    // No onboard debugger → the default must be no-probe.
+                    Some(def) => assert!(
+                        s.builtin_debug || !def.needs_probe,
+                        "{}/{}: default flash route needs a probe", v.id, s.id
+                    ),
+                    None => {}
                 }
             }
         }
@@ -2359,18 +2451,28 @@ mod tests {
                 );
             }
         }
-        // Every non-ESP DEFAULT route is USB/UF2: no probe-rs, because there is no
-        // SWD probe out of the box.
+        // Every non-ESP DEFAULT route is a no-probe USB/UF2 tool — UNLESS the board
+        // carries its own onboard debugger (the XIAO nRF54L15's SAMD11 CMSIS-DAP),
+        // in which case probe-rs over that built-in probe IS the out-of-the-box,
+        // no-external-hardware default.
         for v in VARIANTS {
             if v.is_esp() {
                 continue;
             }
             for s in v.stacks {
-                assert!(
-                    !s.default_tool(ToolCategory::Flashing).unwrap().prereqs.contains(&"probe-rs"),
-                    "{}/{} default flash route must not need a debug probe",
-                    v.id, s.id
-                );
+                let def = s.default_tool(ToolCategory::Flashing).unwrap();
+                if s.builtin_debug {
+                    assert_eq!(
+                        def.id, "probe-rs",
+                        "{}/{}: an onboard-debug board defaults to probe-rs", v.id, s.id
+                    );
+                } else {
+                    assert!(
+                        !def.prereqs.contains(&"probe-rs"),
+                        "{}/{} default flash route must not need a debug probe",
+                        v.id, s.id
+                    );
+                }
             }
         }
     }
@@ -2448,5 +2550,60 @@ mod tests {
             "µFerris must be firmly off for the C5"
         );
         assert!(c5.default_crates.is_empty());
+    }
+
+    /// The XIAO nRF54L15: a P1 non-ESP (Cortex-M33) part on the embassy-nrf HAL
+    /// ALONE (blocking nrf-hal does not support the nRF54 family). It is the first
+    /// Cortex-M board with `builtin_debug` (onboard SAMD11 CMSIS-DAP), so probe-rs
+    /// is its no-external-probe flash default — no UF2 route at all.
+    #[test]
+    fn nrf54l15_variant_is_correct() {
+        let v = variant("xiao-nrf54l15").expect("xiao-nrf54l15 must be registered");
+        assert_eq!(v.display, "XIAO nRF54L15");
+        assert_eq!(v.priority, 1, "nRF54L15 is a P1 non-ESP variant");
+        assert_eq!(v.chip, "nrf54l15");
+        assert_eq!(v.arch, Arch::Arm);
+
+        // LED: P2.00, active-low. gpio=0/port-in-template (see the variant note).
+        assert_eq!(v.led.unwrap().gpio, 0);
+        assert_eq!(v.led.unwrap().active_low, Some(true));
+
+        // ONE stack, embassy-nrf, Cortex-M33 target.
+        assert_eq!(v.stacks.len(), 1, "embassy-nrf only — no blocking nrf-hal on nRF54");
+        let s = v.stack("embassy-nrf").expect("nRF54L15 has an embassy-nrf stack");
+        assert_eq!(v.default_stack().id, "embassy-nrf");
+        assert!(matches!(s.backend, Backend::NonEspScaffold));
+        assert_eq!(s.target, "thumbv8m.main-none-eabihf");
+
+        // Framework axis: none (blocking) + embassy (async) live; rtic a declared
+        // gap. It is an embassy HAL, so embassy is NOT gapped.
+        assert_eq!(s.support(ToolCategory::Framework), &["none", "embassy", "rtic"]);
+        assert!(s.framework_gap("embassy").is_none(), "embassy HAL: embassy is live");
+        assert!(s.framework_gap("rtic").is_some(), "rtic is a declared gap");
+
+        // Flashing: probe-rs ONLY (onboard CMSIS-DAP), and it is the default.
+        assert_eq!(s.flashing, &["probe-rs"]);
+        assert_eq!(s.default_tool(ToolCategory::Flashing).unwrap().id, "probe-rs");
+        assert!(s.builtin_debug, "onboard SAMD11 CMSIS-DAP → built-in debug");
+        // Because builtin_debug is set, the external-probe note is suppressed even
+        // though probe-rs is a needs_probe tool.
+        let probe_rs = tool_choice(ToolCategory::Flashing, "probe-rs").unwrap();
+        assert!(crate::model::flashing_probe_note(s, probe_rs).is_none());
+
+        // Logging: none/defmt (no ESP-only `log`).
+        assert_eq!(s.support(ToolCategory::Logging), &["none", "defmt"]);
+
+        // Scaffold: embassy-nrf 0.11 with the nrf54l15-app-s chip feature, memory.x
+        // body present, M33 rustflags.
+        let sc = s.scaffold.expect("nRF54L15 carries scaffold data");
+        assert_eq!(sc.hal_crate, "embassy-nrf");
+        assert!(sc.hal_features.contains(&"nrf54l15-app-s"), "chip-select feature");
+        assert_eq!(sc.memory_x, Some("nrf54l15"));
+        assert!(crate::templates::memory_x("nrf54l15").is_some());
+        assert!(sc.rustflags.contains(&"target-cpu=cortex-m33"), "M33 CPU model");
+
+        // Not µFerris-eligible.
+        assert!(v.uferris_chip_feature.is_none());
+        assert!(v.default_crates.is_empty());
     }
 }

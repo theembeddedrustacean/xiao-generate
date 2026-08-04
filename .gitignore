@@ -1,5 +1,8 @@
 /target
 
+# macOS Finder metadata — never track or package it.
+.DS_Store
+
 # NOTE: running the tool from the repo root drops a generated project here (e.g.
 # `cargo run -- --name blinky` creates ./blinky). Those carry their own
 # Cargo.toml + .cargo/config.toml pinning a bare-metal target, which

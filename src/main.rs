@@ -227,6 +227,14 @@ fn generate(cfg: &Config, consent: backend::Consent) -> i32 {
         return 1;
     }
     print_summary(cfg);
+    // The summary just reported each prerequisite with a ✔/✗. Offer to install
+    // the missing cargo/rustup ones (targets + flash tools) with the same consent
+    // flow as the backends, so a single command stands the whole project up.
+    // Best-effort: a failed install warns but never fails a generated project.
+    if let Err(e) = backend::bootstrap::ensure_prereqs(cfg, consent) {
+        eprintln!("warning: {e:#}");
+    }
+    print_next_steps(cfg);
     0
 }
 
@@ -463,16 +471,17 @@ fn print_summary(cfg: &Config) {
     println!("\n  equivalent command:");
     println!("    {}", model::equivalent_command(cfg));
     print_prerequisites(cfg);
-    // The unconditional `rustup target add` and "S3 is Xtensa" lines that used to
-    // live here are gone: the prerequisite block above says the same things, but
-    // only when they are actually outstanding on this host, and with the exact
-    // install command. Telling a user to install a target the probe just found is
-    // the noise this feature exists to remove.
+}
+
+/// The actionable next-steps footer. Printed AFTER the prerequisite-install
+/// offer (see `generate`) so `cd` / `cargo build` come last, once the tool has
+/// had its chance to install what the report flagged. The `rustup target add`
+/// line is the fallback for a user who declined that offer (or ran
+/// `--no-install`); it is a no-op if the target is already there.
+fn print_next_steps(cfg: &Config) {
     println!("\nNext steps:");
     println!("  cd {}", cfg.out_dir.display());
     if !cfg.stack.backend.is_esp() {
-        // The non-ESP scaffold pins the target in .cargo/config.toml but cannot
-        // install it for the user.
         println!("  rustup target add {}", cfg.stack.target);
     }
     println!("  cargo build");

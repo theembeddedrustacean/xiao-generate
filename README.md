@@ -119,10 +119,11 @@ a compile-verified body: `camera-snapshot` and `sd-list` on the S3 Sense.
 For everything except ESP-IDF `std` development, **you don't install anything by
 hand.** `xiao-generate` works out exactly what each project needs — the right
 Rust target and a flash tool — and every one of those installs with `cargo
-install` or `rustup`. It installs its own ESP backends on first use (with your
-consent), and after generating it prints each prerequisite with a live ✔/✗ and
-the exact one-line command for anything missing; `xiao-generate --check --chip
-<chip>` reports the same without generating.
+install` or `rustup`. It installs its own ESP backends on first use, and after
+generating it reports each prerequisite with a live ✔/✗ and **offers to install
+the missing ones for you** — all with a simple `[Y/n]` prompt (`--yes` installs
+without asking, `--no-install` just prints the commands). `xiao-generate --check
+--chip <chip>` reports the same without generating.
 
 The **one exception is ESP-IDF (`std`) development**. That toolchain — the C
 ESP-IDF SDK and its per-OS system packages — is set up outside this tool and

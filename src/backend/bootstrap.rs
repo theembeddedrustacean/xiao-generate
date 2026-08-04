@@ -63,6 +63,93 @@ pub fn ensure_cargo_generate(consent: Consent) -> Result<()> {
     ensure("cargo-generate", cargo_generate_present, &["install", "cargo-generate"], consent)
 }
 
+/// After a project is generated, offer to install the prerequisites it still
+/// needs — the build target and flash tool — with the SAME consent flow as the
+/// backends, so `cargo install xiao-generate` really is the only thing a user
+/// installs by hand.
+///
+/// The summary has already printed each prerequisite with a ✔/✗, so this only
+/// acts on the ✗s. Only prerequisites whose install command is a plain
+/// `cargo …`/`rustup …` are installed here; a system package (`brew` /
+/// `xcode-select`, reached only by the ESP-IDF `std` build) is reported for the
+/// user to handle. Best-effort: a failed install warns and continues — the
+/// project already exists on disk.
+pub fn ensure_prereqs(cfg: &crate::model::Config, consent: Consent) -> Result<()> {
+    use crate::prereq::{Host, Status};
+
+    let mut host = Host::new();
+    let missing: Vec<_> = crate::model::prerequisites(cfg)
+        .into_iter()
+        .filter(|&p| host.detect(p) == Status::Missing)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let installable: Vec<_> =
+        missing.iter().copied().filter(|p| is_cargo_or_rustup(p.install)).collect();
+    let manual: Vec<_> =
+        missing.iter().copied().filter(|p| !is_cargo_or_rustup(p.install)).collect();
+
+    // System packages we can't install (only the ESP-IDF std build reaches these).
+    for p in &manual {
+        eprintln!("  · {} isn't a cargo/rustup install — set it up yourself: {}", p.display, p.install);
+    }
+    if installable.is_empty() {
+        return Ok(());
+    }
+
+    match consent {
+        // --no-install: the summary already showed every command; leave it there.
+        Consent::Never => return Ok(()),
+        Consent::AssumeYes => {}
+        Consent::Prompt => {
+            let list = installable.iter().map(|p| p.display).collect::<Vec<_>>().join(", ");
+            let q = format!(
+                "{} missing prerequisite(s) — {list} — install now?",
+                installable.len()
+            );
+            if !confirm(&q) {
+                return Ok(());
+            }
+        }
+    }
+
+    for p in &installable {
+        eprintln!("→ installing {}: {}", p.display, p.install);
+        match run_install(p.install) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("  warning: `{}` failed — install {} yourself", p.install, p.display)
+            }
+            Err(e) => eprintln!(
+                "  warning: couldn't run `{}` ({e}) — install {} yourself",
+                p.install, p.display
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// Whether a prerequisite's install command is one we can run for the user (a
+/// `cargo …` / `rustup …` command), as opposed to a system-package command
+/// (`brew …` / `xcode-select …`) we can only point at.
+fn is_cargo_or_rustup(install: &str) -> bool {
+    install.starts_with("cargo ") || install.starts_with("rustup ")
+}
+
+/// Run an install command line — which may chain steps with `&&` — through the
+/// shell, inheriting stdio so the user sees progress. Returns whether it exited
+/// successfully.
+fn run_install(cmd: &str) -> Result<bool> {
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .status()
+        .with_context(|| format!("failed to launch `{cmd}`"))?;
+    Ok(status.success())
+}
+
 fn esp_generate_present() -> bool {
     runs(Command::new("esp-generate").arg("--version"))
 }
@@ -180,5 +267,17 @@ mod tests {
         // false and `ensure` must bail WITHOUT attempting a `cargo install`.
         let err = ensure("dummy", absent, &["install", "dummy"], Consent::Prompt).unwrap_err();
         assert!(err.to_string().contains("--yes"));
+    }
+
+    #[test]
+    fn only_cargo_and_rustup_commands_are_auto_installable() {
+        // These the prereq bootstrap can run for the user…
+        assert!(is_cargo_or_rustup("cargo install espflash --locked"));
+        assert!(is_cargo_or_rustup("cargo install espup --locked && espup install"));
+        assert!(is_cargo_or_rustup("rustup target add thumbv6m-none-eabi"));
+        assert!(is_cargo_or_rustup("rustup toolchain install nightly --component rust-src"));
+        // …these it can only point at (system packages).
+        assert!(!is_cargo_or_rustup("brew install python3"));
+        assert!(!is_cargo_or_rustup("xcode-select --install"));
     }
 }

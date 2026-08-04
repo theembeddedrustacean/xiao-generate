@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use crate::backend::bootstrap::Consent;
 use crate::model::Config;
 use crate::registry::{
-    CARGO_GENERATE_MIN_VERSION, ESP_IDF_TEMPLATE_GIT, ESP_IDF_TEMPLATE_REV, ESP_IDF_VERSION,
+    CARGO_GENERATE_MIN_VERSION, ESP_IDF_TEMPLATE_GIT, ESP_IDF_TEMPLATE_REV,
 };
 
 /// Check `cargo generate` is installed and report its version. Missing tool → a
@@ -165,11 +165,13 @@ pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
         .arg(name)
         .arg("--define")
         .arg(format!("mcu={}", cfg.variant.chip))
-        // `advanced=true` unlocks espidfver; we pin it explicitly (D2/R5).
+        // `advanced=true` unlocks espidfver; we set it explicitly (D2/R5) to the
+        // user's choice (default `ESP_IDF_VERSION`), validated against the
+        // template's own choice set in `Config::resolve`.
         .arg("--define")
         .arg("advanced=true")
         .arg("--define")
-        .arg(format!("espidfver={ESP_IDF_VERSION}"))
+        .arg(format!("espidfver={}", cfg.espidf_version))
         .arg("--silent")
         .arg("--vcs")
         .arg("none")

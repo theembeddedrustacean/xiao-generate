@@ -70,14 +70,17 @@ fn invalid_combo_exits_nonzero_with_message() {
 }
 
 #[test]
-fn uferris_on_s3_reports_gap() {
-    let out = bin()
-        .args(["--chip", "xiao-esp32s3", "--uferris"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("not available"), "stderr: {err}");
+fn uferris_flag_is_refused_as_not_supported_yet() {
+    // µFerris BSP is gated off at the CLI entry point (registry::UFERRIS_READY =
+    // false), so `--uferris` is refused up front on ANY chip — before any device
+    // -specific check such as the S3 gap (which is still covered at the model
+    // level by `uferris_on_s3_is_a_documented_gap`). Exit 2 with a clear reason.
+    for chip in ["xiao-esp32c3", "xiao-esp32s3"] {
+        let out = bin().args(["--chip", chip, "--uferris"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "chip {chip}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("not supported yet"), "chip {chip} stderr: {err}");
+    }
 }
 
 #[test]
@@ -246,7 +249,13 @@ fn snapshot_s3_sense_sd_adds_driver_deps() {
     assert!(main.contains("embedded_sdmmc"));
 }
 
+// µFerris BSP generation is gated off at the CLI (registry::UFERRIS_READY =
+// false), so it cannot be driven end-to-end through the binary right now. The
+// generation machinery it exercises (the uferris-bsp dep + `uferris_init` body)
+// is unchanged and still resolves in the model-level tests; un-ignore this when
+// the switch flips back on.
 #[test]
+#[ignore = "µFerris BSP gated off until registry::UFERRIS_READY = true"]
 fn snapshot_c3_uferris_adds_bsp_dep() {
     if !esp_generate_available() {
         eprintln!("skipping: esp-generate not installed");

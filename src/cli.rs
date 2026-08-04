@@ -43,6 +43,12 @@ pub struct Cli {
     #[arg(long)]
     pub std: bool,
 
+    /// ESP-IDF SDK version for the std / esp-idf stack: `v5.5.3` (default),
+    /// `v5.4.3`, `v5.3.4`, or `master` (UNSTABLE). Only valid on the esp-idf
+    /// stack; ignored/rejected elsewhere. See --list-stacks.
+    #[arg(long = "espidf-version", value_name = "VERSION")]
+    pub espidf_version: Option<String>,
+
     /// Template to generate (see --list-templates). Defaults to the variant's base template.
     #[arg(long, short = 't')]
     pub template: Option<String>,

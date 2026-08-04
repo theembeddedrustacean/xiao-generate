@@ -84,9 +84,22 @@ fn build_raw(args: &Cli) -> Result<RawConfig, String> {
         (None, false) => None,
     };
 
+    // µFerris BSP is planned but not supported yet — gate it at the CLI entry
+    // point (the single switch is registry::UFERRIS_READY). The generation code
+    // stays intact and validated by `Config::resolve`'s own tests; only the user
+    // -facing flags are refused here, exactly like the TUI toggle is greyed out.
+    if (args.uferris || args.power_board) && !registry::UFERRIS_READY {
+        return Err(
+            "µFerris BSP support is planned but not supported yet — re-run without \
+             --uferris / --power-board."
+                .to_string(),
+        );
+    }
+
     Ok(RawConfig {
         chip,
         stack,
+        espidf_version: args.espidf_version.clone(),
         template: args.template.clone(),
         name: args.name.clone(),
         out_dir: args.out.clone(),
@@ -472,7 +485,7 @@ fn print_summary(cfg: &Config) {
         // picture for Xtensa (where the prerequisite block names it).
         println!(
             "  (esp-idf std stack: the first build pulls & builds the ESP-IDF {} SDK via esp-idf-sys — expect a long first build)",
-            registry::ESP_IDF_VERSION
+            cfg.espidf_version
         );
     }
 }

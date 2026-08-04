@@ -1,10 +1,14 @@
 # `xiao-generate`
 
+[![crates.io](https://img.shields.io/crates/v/xiao-generate.svg)](https://crates.io/crates/xiao-generate)
+[![downloads](https://img.shields.io/crates/d/xiao-generate.svg)](https://crates.io/crates/xiao-generate)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licence)
+
 Generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
 line of SoCs & modules.
 
-At present, this tool supports Nine XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs — and an optional
-[µFerris](https://crates.io/crates/uferris-bsp) BSP mode on the ESP RISC-V parts.
+At present, this tool supports Nine XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs. (A
+[µFerris](https://crates.io/crates/uferris-bsp) BSP mode for the ESP RISC-V parts is planned but not supported yet.)
 
 Supported variants include the XIAO-ESP32-C3/C5/C6/S3, XIAO-RP2040, XIAO-RP2350, XIAO-SAMD21, XIAO-nRF52840 and XIAO-RA4M1. Support for additional devices will be added as they become available.
 
@@ -43,17 +47,15 @@ xiao-generate --chip xiao-rp2040
 # ESP32-C6, async, with defmt logging
 xiao-generate --chip xiao-esp32c6 --framework embassy --logging defmt
 
-# ESP32-C3 on the std / ESP-IDF stack (--std is shorthand for --stack esp-idf)
-xiao-generate --chip xiao-esp32c3 --std
+# ESP32-C3 on the std / ESP-IDF stack (--std ≡ --stack esp-idf), pinning the
+# ESP-IDF SDK version (default v5.5.3; also v5.4.3, v5.3.4, master)
+xiao-generate --chip xiao-esp32c3 --std --espidf-version v5.4.3
 
 # S3 Sense camera template, into a named directory
 xiao-generate --chip xiao-esp32s3-sense --template camera-snapshot --name cam -o ~/dev/cam
 
 # RP2040 with the embassy HAL and the embassy executor
 xiao-generate --chip xiao-rp2040 --stack embassy-rp --framework embassy
-
-# µFerris BSP mode
-xiao-generate --chip xiao-esp32c3 --uferris
 ```
 
 Useful listings: `--list-chips`, `--list-stacks [--chip X]`,
@@ -65,17 +67,19 @@ Useful listings: `--list-chips`, `--list-stacks [--chip X]`,
 
 ## Supported devices
 
-| Variant | Arch | Stacks (first = default) | Target | µFerris |
-| --- | --- | --- | --- | --- |
-| `xiao-esp32c3` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imc-unknown-none-elf` / `riscv32imc-esp-espidf` | yes |
-| `xiao-esp32c6` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imac-unknown-none-elf` / `riscv32imac-esp-espidf` | yes |
-| `xiao-esp32s3` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` | gap |
-| `xiao-esp32s3-sense` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` | gap |
-| `xiao-rp2040` | Cortex-M0+ | `rp2040-hal`, `embassy-rp` | `thumbv6m-none-eabi` | — |
-| `xiao-rp2350` | Cortex-M33 | `rp235x-hal`, `embassy-rp` | `thumbv8m.main-none-eabihf` | — |
-| `xiao-nrf52840` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` | — |
-| `xiao-nrf52840-sense` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` | — |
-| `xiao-samd21` | Cortex-M0+ | `atsamd-hal` | `thumbv6m-none-eabi` | — |
+| Variant | Arch | Stacks (first = default) | Target |
+| --- | --- | --- | --- |
+| `xiao-esp32c3` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imc-unknown-none-elf` / `riscv32imc-esp-espidf` |
+| `xiao-esp32c6` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imac-unknown-none-elf` / `riscv32imac-esp-espidf` |
+| `xiao-esp32s3` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` |
+| `xiao-esp32s3-sense` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` |
+| `xiao-rp2040` | Cortex-M0+ | `rp2040-hal`, `embassy-rp` | `thumbv6m-none-eabi` |
+| `xiao-rp2350` | Cortex-M33 | `rp235x-hal`, `embassy-rp` | `thumbv8m.main-none-eabihf` |
+| `xiao-nrf52840` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
+| `xiao-nrf52840-sense` | Cortex-M4F | `nrf-hal`, `embassy-nrf` | `thumbv7em-none-eabihf` |
+| `xiao-samd21` | Cortex-M0+ | `atsamd-hal` | `thumbv6m-none-eabi` |
+
+The µFerris BSP mode (ESP32-C3 / C6 first) is planned but not supported yet.
 
 The HAL axis and the framework axis are orthogonal: an embassy HAL builds fine
 with `--framework none`, and `--framework embassy` requires an embassy HAL (a

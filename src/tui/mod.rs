@@ -175,6 +175,9 @@ impl Theme {
 enum Row {
     Device,
     Stack(usize),
+    /// One entry in the ESP-IDF VERSION section (index into
+    /// `registry::ESP_IDF_VERSIONS`). Present only on the esp-idf (std) stack.
+    EspIdfVersion(usize),
     Flashing(usize),
     Logging(usize),
     Framework(usize),
@@ -193,6 +196,9 @@ struct App {
     flashing_idx: usize,
     logging_idx: usize,
     framework_idx: usize,
+    /// Selected index into `registry::ESP_IDF_VERSIONS` (default 0 = the default
+    /// version). Only used on the esp-idf stack; persists across stack switches.
+    espidf_version_idx: usize,
     /// Selected index into `registry::EDITORS` — a single-select radio list like
     /// the toolchain sections, with `none` a normal catalog entry.
     editor_idx: usize,
@@ -234,6 +240,7 @@ impl App {
             flashing_idx: 0,
             logging_idx: 0,
             framework_idx: 0,
+            espidf_version_idx: 0,
             // The same registry default the CLI uses, so the TUI and a bare
             // headless run start from an identical selection.
             editor_idx: registry::EDITORS
@@ -269,8 +276,18 @@ impl App {
         &self.variant().stacks[self.stack_idx]
     }
 
-    fn uferris_enabled(&self) -> bool {
+    /// Whether the current variant/stack is *capable* of µFerris (C3/C6 esp-hal).
+    /// Independent of whether the feature is shipped — used to decide whether the
+    /// greyed toggle carries the "planned — not yet supported" note.
+    fn uferris_eligible(&self) -> bool {
         model::uferris_available(self.variant(), self.current_stack())
+    }
+
+    /// Whether the µFerris toggle can actually be turned on. Eligibility AND the
+    /// ship switch (`registry::UFERRIS_READY`): the BSP is planned but not yet
+    /// supported, so this is currently false everywhere and the toggle is greyed.
+    fn uferris_enabled(&self) -> bool {
+        self.uferris_eligible() && registry::UFERRIS_READY
     }
 
     /// Whether ONE toolchain section is a live, editable axis for the current
@@ -362,6 +379,14 @@ impl App {
         let mut rows = vec![Row::Device];
         for i in 0..self.variant().stacks.len() {
             rows.push(Row::Stack(i));
+        }
+        // ESP-IDF VERSION is a live axis only on the esp-idf (std) stack, and it
+        // sits right after STACK (a stack-level property), so its Tab order and
+        // on-screen order match.
+        if self.current_stack().is_std() {
+            for i in 0..registry::ESP_IDF_VERSIONS.len() {
+                rows.push(Row::EspIdfVersion(i));
+            }
         }
         // A toolchain section contributes focusable rows only when THAT category is
         // a live axis for the stack (esp-hal: all three; non-ESP: FRAMEWORK only;
@@ -477,6 +502,7 @@ impl App {
         match self.focus {
             Row::Device => self.move_variant(1),
             Row::Stack(i) => self.select_stack(i),
+            Row::EspIdfVersion(i) => self.espidf_version_idx = i,
             Row::Flashing(i) => self.select_cat(ToolCategory::Flashing, i),
             Row::Logging(i) => self.select_cat(ToolCategory::Logging, i),
             Row::Framework(i) => self.select_cat(ToolCategory::Framework, i),
@@ -517,6 +543,13 @@ impl App {
         RawConfig {
             chip: self.variant().id.to_string(),
             stack: Some(self.current_stack().id.to_string()),
+            // Only the esp-idf stack has an espidfver knob; forward it there only,
+            // so a stale index never leaks onto a non-std stack (resolution would
+            // reject `--espidf-version` off esp-idf).
+            espidf_version: self
+                .current_stack()
+                .is_std()
+                .then(|| registry::ESP_IDF_VERSIONS[self.espidf_version_idx].id.to_string()),
             template: None,
             name: Some(self.name.clone()),
             out_dir: None,
@@ -658,19 +691,13 @@ fn draw(f: &mut Frame, app: &App) {
         .split(f.area());
 
     // Header.
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            " xiao-generate ",
-            Style::default()
-                .fg(theme.header_fg)
-                .bg(theme.header_bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "  one page · universal toolchain · live preview",
-            Style::default().fg(theme.enabled),
-        ),
-    ]))
+    let header = Paragraph::new(Line::from(vec![Span::styled(
+        " xiao-generate ",
+        Style::default()
+            .fg(theme.header_fg)
+            .bg(theme.header_bg)
+            .add_modifier(Modifier::BOLD),
+    )]))
     .style(theme.base())
     .block(
         Block::default()
@@ -886,6 +913,31 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ));
     }
 
+    // ---- ESP-IDF VERSION (esp-idf / std stack only) ----
+    // A plain radio list of the versions esp-idf-template accepts at our pinned
+    // rev; shown only on the std stack, where it is a real, live axis. `master`
+    // carries an "unstable" hint (upstream labels it so).
+    if s.is_std() {
+        lines.push(Line::from(""));
+        lines.push(heading(theme, "ESP-IDF VERSION"));
+        for (i, ver) in registry::ESP_IDF_VERSIONS.iter().enumerate() {
+            let hint = if ver.unstable { "unstable" } else { "" };
+            if focus == Row::EspIdfVersion(i) {
+                focus_line = lines.len() as u16;
+            }
+            lines.push(radio_line(
+                theme,
+                focus == Row::EspIdfVersion(i),
+                app.espidf_version_idx == i,
+                false, // never greyed — every offered version is selectable
+                false, // never inactive
+                "  ",
+                ver.id,
+                hint,
+            ));
+        }
+    }
+
     // ---- FLASHING TOOL / LOGGING / FRAMEWORK ----
     // FLASHING and LOGGING render only the stack's supported entries, in support-
     // list order (its no-probe/none default first) — the wrong-device flashers and
@@ -979,9 +1031,17 @@ fn draw_form(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     lines.push(Line::from(""));
     lines.push(heading(theme, "BSP SUPPORT"));
     let uf_enabled = app.uferris_enabled();
-    // Eligibility hint only on the ENABLED toggle; a greyed µFerris toggle shows
-    // no reason beside it — greying alone signals it is unavailable.
-    let uf_hint = if uf_enabled { "esp-hal C3/C6" } else { "" };
+    // The toggle is greyed while µFerris is unshipped (registry::UFERRIS_READY).
+    // On a CAPABLE variant (C3/C6 esp-hal) say WHY — "planned — not yet
+    // supported" — so users see it is coming, not merely N/A for this board.
+    // Elsewhere it is simply not applicable, so no note.
+    let uf_hint = if uf_enabled {
+        "esp-hal C3/C6"
+    } else if app.uferris_eligible() {
+        "planned — not yet supported"
+    } else {
+        ""
+    };
     if focus == Row::Uferris {
         focus_line = lines.len() as u16;
     }
@@ -1067,14 +1127,22 @@ fn cat_row(cat: ToolCategory, i: usize) -> Row {
 /// renderer and the focus model, so keyboard focus order always matches the
 /// on-screen order.
 fn section_indices(stack: &Stack, cat: ToolCategory) -> Vec<usize> {
-    match cat {
-        ToolCategory::Framework => (0..cat.catalog().len()).collect(),
-        _ => stack
-            .support(cat)
-            .iter()
-            .filter_map(|id| cat.catalog().iter().position(|c| c.id == *id))
-            .collect(),
+    // FRAMEWORK shows the WHOLE catalog only where it is a live axis (esp-hal /
+    // non-ESP): that is what keeps the declared gaps (RTIC, embassy-on-a-blocking
+    // -HAL) visible-but-greyed with a reason. On a template-owned stack (esp-idf)
+    // it has no live frameworks, so — exactly like FLASHING and LOGGING — it
+    // collapses to its (empty) support list instead of dangling an irrelevant
+    // none/embassy/rtic list under a "configured by the esp-idf template" heading.
+    let whole_catalog =
+        matches!(cat, ToolCategory::Framework) && model::category_live(stack, cat);
+    if whole_catalog {
+        return (0..cat.catalog().len()).collect();
     }
+    stack
+        .support(cat)
+        .iter()
+        .filter_map(|id| cat.catalog().iter().position(|c| c.id == *id))
+        .collect()
 }
 
 fn draw_summary(f: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -1647,6 +1715,69 @@ mod tests {
             3,
             "all three esp-idf headers carry the reason:\n{s}"
         );
+    }
+
+    /// µFerris is planned but not shipped (registry::UFERRIS_READY = false), so
+    /// its toggle cannot be enabled even on a capable board (C3 esp-hal): it is
+    /// not focusable, and the greyed toggle says WHY.
+    #[test]
+    fn uferris_toggle_is_gated_off_as_not_supported_yet() {
+        let app = app_on("xiao-esp32c3", 0); // esp-hal — µFerris-capable
+        assert!(app.uferris_eligible(), "C3 esp-hal is capable of µFerris");
+        assert!(!app.uferris_enabled(), "but it is gated off until it ships");
+        assert!(
+            !app
+                .focusable_rows()
+                .iter()
+                .any(|r| matches!(r, Row::Uferris | Row::PowerBoard | Row::Async)),
+            "no µFerris row is focusable while gated: {:?}",
+            app.focusable_rows()
+        );
+        let s = render(&app, W, H);
+        assert!(
+            s.contains("planned — not yet supported"),
+            "the greyed toggle explains why:\n{s}"
+        );
+    }
+
+    /// The ESP-IDF version selector is a live axis only on the std stack: its
+    /// rows are focusable, the section renders the offered versions, and `master`
+    /// is flagged unstable. It is absent on the no_std stack.
+    #[test]
+    fn espidf_version_selector_lives_only_on_the_std_stack() {
+        let std_app = app_on("xiao-esp32c3", 1); // esp-idf (std)
+        assert!(std_app.current_stack().is_std());
+        assert!(
+            std_app
+                .focusable_rows()
+                .iter()
+                .any(|r| matches!(r, Row::EspIdfVersion(_))),
+            "version rows are focusable on esp-idf: {:?}",
+            std_app.focusable_rows()
+        );
+        let s = render(&std_app, W, H);
+        assert!(s.contains("ESP-IDF VERSION"), "section header present:\n{s}");
+        assert!(
+            s.contains("v5.5.3") && s.contains("v5.4.3") && s.contains("master"),
+            "versions listed:\n{s}"
+        );
+        assert!(s.contains("unstable"), "master flagged unstable:\n{s}");
+
+        let hal = app_on("xiao-esp32c3", 0);
+        assert!(
+            !render(&hal, W, H).contains("ESP-IDF VERSION"),
+            "no version section on the esp-hal stack"
+        );
+    }
+
+    /// Selecting a version updates the index and flows into the forwarded config.
+    #[test]
+    fn selecting_an_espidf_version_flows_into_the_config() {
+        let mut app = app_on("xiao-esp32c3", 1); // esp-idf
+        app.focus = Row::EspIdfVersion(1); // v5.4.3
+        app.activate();
+        assert_eq!(app.espidf_version_idx, 1);
+        assert_eq!(app.raw_config().espidf_version.as_deref(), Some("v5.4.3"));
     }
 
     /// Enabling µFerris makes the power-board and async rows live, but selects

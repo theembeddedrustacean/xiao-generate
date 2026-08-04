@@ -179,6 +179,11 @@ pub struct Config {
     /// Resolved stack (`esp-hal`, `esp-idf`, …). Selects the backend, target,
     /// and template set for this project (D6).
     pub stack: &'static Stack,
+    /// ESP-IDF SDK version baked into a `std`/esp-idf project (the `espidfver`
+    /// value). Resolved from `--espidf-version` against [`registry::ESP_IDF_VERSIONS`],
+    /// defaulting to [`registry::ESP_IDF_VERSION`]. Only used by the esp-idf
+    /// backend; carries the default on every other stack.
+    pub espidf_version: &'static str,
     /// Template id. For µFerris mode this is a µFerris template (e.g. `blinky`);
     /// for the ESP `std` stack the synthetic `base`; otherwise a registry
     /// template (`base-blink`, `camera-snapshot`, …).
@@ -235,6 +240,9 @@ pub struct RawConfig {
     pub chip: String,
     /// Stack id (`--stack`). `None` = the variant's default stack.
     pub stack: Option<String>,
+    /// ESP-IDF version id (`--espidf-version`). `None` = the default
+    /// ([`registry::ESP_IDF_VERSION`]). Only valid on the esp-idf stack.
+    pub espidf_version: Option<String>,
     pub template: Option<String>,
     pub name: Option<String>,
     pub out_dir: Option<PathBuf>,
@@ -306,6 +314,38 @@ impl Config {
                 )
             })?,
             None => variant.default_stack(),
+        };
+
+        // --- ESP-IDF version (std / esp-idf stack only) ---
+        // Resolve `--espidf-version` against the template's own choice set
+        // (`ESP_IDF_VERSIONS`), defaulting to `ESP_IDF_VERSION`. Only the esp-idf
+        // stack has an `espidfver` knob, so requesting a version on any other
+        // stack is a clear error rather than a silently-ignored flag.
+        let espidf_version = match raw.espidf_version.as_deref() {
+            None => registry::ESP_IDF_VERSION,
+            Some(v) => {
+                if !matches!(stack.backend, Backend::CargoGenerate) {
+                    return Err(format!(
+                        "--espidf-version is only valid on the esp-idf (std) stack, not '{}'. \
+                         Use --std / --stack esp-idf, or drop --espidf-version.",
+                        stack.id
+                    ));
+                }
+                registry::ESP_IDF_VERSIONS
+                    .iter()
+                    .find(|e| e.id == v)
+                    .map(|e| e.id)
+                    .ok_or_else(|| {
+                        format!(
+                            "unknown ESP-IDF version '{v}'. Available: {}",
+                            registry::ESP_IDF_VERSIONS
+                                .iter()
+                                .map(|e| e.id)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?
+            }
         };
 
         // --- backend availability ---
@@ -534,6 +574,7 @@ impl Config {
         let cfg = Config {
             variant,
             stack,
+            espidf_version,
             template_id,
             project_name,
             out_dir,
@@ -688,6 +729,14 @@ pub fn equivalent_command(cfg: &Config) -> String {
         parts.push(format!("--stack {}", cfg.stack.id));
     }
 
+    // --espidf-version only on the esp-idf stack, and only when it differs from
+    // the default (keep the reproduced command terse but faithful).
+    if matches!(cfg.stack.backend, Backend::CargoGenerate)
+        && cfg.espidf_version != registry::ESP_IDF_VERSION
+    {
+        parts.push(format!("--espidf-version {}", cfg.espidf_version));
+    }
+
     if cfg.uferris.is_some() {
         parts.push("--uferris".to_string());
         if cfg.uferris.as_ref().map(|u| u.power_board).unwrap_or(false) {
@@ -825,6 +874,7 @@ mod tests {
         RawConfig {
             chip: chip.to_string(),
             stack: None,
+            espidf_version: None,
             template: None,
             name: None,
             out_dir: None,
@@ -1027,6 +1077,61 @@ mod tests {
         assert_eq!(c.template_id, "blinky");
         let opts = c.esp_options();
         assert!(opts.contains(&"embassy") && opts.contains(&"esp-backtrace"), "got: {opts:?}");
+    }
+
+    #[test]
+    fn espidf_version_defaults_to_the_pin() {
+        let mut r = raw("xiao-esp32c3");
+        r.stack = Some("esp-idf".to_string());
+        let c = Config::resolve(r).unwrap();
+        assert_eq!(c.espidf_version, registry::ESP_IDF_VERSION);
+    }
+
+    #[test]
+    fn espidf_version_selects_an_offered_version() {
+        let mut r = raw("xiao-esp32c3");
+        r.stack = Some("esp-idf".to_string());
+        r.espidf_version = Some("v5.4.3".to_string());
+        let c = Config::resolve(r).unwrap();
+        assert_eq!(c.espidf_version, "v5.4.3");
+    }
+
+    #[test]
+    fn unknown_espidf_version_is_rejected() {
+        let mut r = raw("xiao-esp32c3");
+        r.stack = Some("esp-idf".to_string());
+        r.espidf_version = Some("v9.9.9".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(
+            e.contains("unknown ESP-IDF version") && e.contains("v5.5.3"),
+            "got: {e}"
+        );
+    }
+
+    #[test]
+    fn espidf_version_is_rejected_off_the_esp_idf_stack() {
+        // Default stack for c3 is esp-hal (no_std) — no espidfver knob there.
+        let mut r = raw("xiao-esp32c3");
+        r.espidf_version = Some("v5.4.3".to_string());
+        let e = Config::resolve(r).unwrap_err();
+        assert!(e.contains("only valid on the esp-idf"), "got: {e}");
+    }
+
+    #[test]
+    fn parity_espidf_version_shows_flag_only_when_non_default() {
+        let mut def = raw("xiao-esp32c3");
+        def.stack = Some("esp-idf".to_string());
+        let cmd = equivalent_command(&Config::resolve(def).unwrap());
+        assert!(!cmd.contains("--espidf-version"), "default must omit the flag: {cmd}");
+
+        let mut nd = raw("xiao-esp32c3");
+        nd.stack = Some("esp-idf".to_string());
+        nd.espidf_version = Some("v5.3.4".to_string());
+        let cmd = equivalent_command(&Config::resolve(nd).unwrap());
+        assert!(
+            cmd.contains("--espidf-version v5.3.4"),
+            "non-default must show the flag: {cmd}"
+        );
     }
 
     #[test]

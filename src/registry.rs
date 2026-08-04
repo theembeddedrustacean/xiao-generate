@@ -28,10 +28,41 @@ pub const UFERRIS_BSP_VERSION: &str = "0.1.3";
 pub const ESP_IDF_TEMPLATE_GIT: &str = "https://github.com/esp-rs/esp-idf-template";
 pub const ESP_IDF_TEMPLATE_REV: &str = "6f092f06c8cef93a41b82b4d5c7373446e9fcf1b";
 pub const CARGO_GENERATE_MIN_VERSION: &str = "0.17.4";
-/// ESP-IDF SDK version baked into the generated project (`espidfver` placeholder).
+/// Default ESP-IDF SDK version baked into a generated `std` project (the
+/// `espidfver` placeholder). The user may pick another from [`ESP_IDF_VERSIONS`];
+/// this is the value used when they don't. Must be `ESP_IDF_VERSIONS[0].id`.
 pub const ESP_IDF_VERSION: &str = "v5.5.3";
+
+/// One selectable ESP-IDF SDK version for the `std`/esp-idf stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EspIdfVersion {
+    /// The `espidfver` value passed to esp-idf-template.
+    pub id: &'static str,
+    /// `true` for a moving/pre-release branch (upstream marks `master` UNSTABLE),
+    /// so the UI can flag it. Stable releases are `false`.
+    pub unstable: bool,
+}
+
+/// The ESP-IDF versions the `std` stack offers, in display order (default first).
+/// These are exactly the `espidfver` choices esp-idf-template exposes at the
+/// pinned [`ESP_IDF_TEMPLATE_REV`] — kept in lock-step with the template so we
+/// never pass a value it would reject.
+pub const ESP_IDF_VERSIONS: &[EspIdfVersion] = &[
+    EspIdfVersion { id: "v5.5.3", unstable: false },
+    EspIdfVersion { id: "v5.4.3", unstable: false },
+    EspIdfVersion { id: "v5.3.4", unstable: false },
+    EspIdfVersion { id: "master", unstable: true },
+];
+
 /// XIAO's esp-idf-hal added on top of the template's esp-idf-svc (std base).
 pub const ESP_IDF_HAL_VERSION: &str = "0.46.2";
+
+/// Whether µFerris BSP support is ready to ship. It is currently **off**: the
+/// BSP is generatable in the code but not hardware-verified, so it is gated out
+/// of both entry points (the TUI toggle and the CLI `--uferris`/`--power-board`
+/// flags) with a "planned — not yet supported" note. Flip this to `true` — the
+/// single switch — to re-enable it everywhere once it is verified.
+pub const UFERRIS_READY: bool = false;
 
 // --- Non-ESP HAL / runtime pins (M4) ---------------------------------------
 // Every version below was COMPILE-verified for the (variant, stack, framework)

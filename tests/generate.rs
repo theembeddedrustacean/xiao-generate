@@ -620,7 +620,7 @@ fn summary_reports_the_editor_and_the_neovim_caveat() {
 // ---------------------------------------------------------------------------
 
 /// Run a probe the same way the tool does: is this executable on PATH at all
-/// (exit status ignored — `picotool --version` exits 255 yet is installed).
+/// (exit status ignored — we only care that the binary exists and runs).
 fn tool_on_path(argv: &[&str]) -> bool {
     let (exe, args) = argv.split_first().unwrap();
     Command::new(exe).args(args).output().is_ok()
@@ -643,25 +643,25 @@ fn summary_reports_prerequisites_and_the_markers_are_real() {
     assert!(s.contains("prerequisites to build:"), "missing build group:\n{s}");
     assert!(s.contains("prerequisites to flash:"), "missing flash group:\n{s}");
     assert!(s.contains("thumbv6m-none-eabi"), "must name the RP2040 target:\n{s}");
-    assert!(s.contains("picotool"), "must name the RP2040 flash tool:\n{s}");
+    assert!(s.contains("elf2uf2-rs"), "must name the RP2040 flash tool:\n{s}");
 
-    // The picotool PREREQUISITE line's marker must agree with an independent
-    // probe. (The summary also carries a `flashing: picotool` line now that
+    // The elf2uf2-rs PREREQUISITE line's marker must agree with an independent
+    // probe. (The summary also carries a `flashing: elf2uf2-rs` line now that
     // FLASHING is a live axis on the non-ESP scaffold, so match the marker line.)
     let line = s
         .lines()
-        .find(|l| l.contains("picotool") && (l.contains('✔') || l.contains('✗')))
-        .unwrap_or_else(|| panic!("no picotool prerequisite line:\n{s}"));
-    if tool_on_path(&["picotool", "version"]) {
-        assert!(line.contains('✔'), "picotool is on PATH but reported missing: {line}");
+        .find(|l| l.contains("elf2uf2-rs") && (l.contains('✔') || l.contains('✗')))
+        .unwrap_or_else(|| panic!("no elf2uf2-rs prerequisite line:\n{s}"));
+    if tool_on_path(&["elf2uf2-rs", "--version"]) {
+        assert!(line.contains('✔'), "elf2uf2-rs is on PATH but reported missing: {line}");
         assert!(
-            !s.contains("install: brew install picotool"),
+            !s.contains("install: cargo install elf2uf2-rs"),
             "an installed tool must not be given an install command:\n{s}"
         );
     } else {
-        assert!(line.contains('✗'), "picotool is not on PATH but reported present: {line}");
+        assert!(line.contains('✗'), "elf2uf2-rs is not on PATH but reported present: {line}");
         assert!(
-            s.contains("install: brew install picotool"),
+            s.contains("install: cargo install elf2uf2-rs"),
             "a missing tool must carry its install command:\n{s}"
         );
     }
@@ -679,14 +679,17 @@ fn prerequisite_report_never_mentions_another_board_s_tools() {
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    for foreign in ["espup", "espflash", "ldproxy", "hf2", "uf2conv"] {
+    // hf2 (SAMD) and the ESP tools stay foreign to RP; uf2deploy is a shared UF2
+    // flasher (also an RP route), so it is not a foreign-tool marker here.
+    for foreign in ["espup", "espflash", "ldproxy", "hf2"] {
         assert!(!s.contains(foreign), "RP2040 summary mentions {foreign}:\n{s}");
     }
 
     // `--check` needs no generator, so the ESP half runs everywhere.
     let out = bin().args(["--check", "--chip", "xiao-esp32c3"]).output().unwrap();
     let s = String::from_utf8_lossy(&out.stdout);
-    for foreign in ["picotool", "uf2conv", "hf2", "thumbv"] {
+    // An ESP report must never name a non-ESP flasher (the UF2/HID routes) or an ARM target.
+    for foreign in ["elf2uf2-rs", "uf2deploy", "hf2", "thumbv"] {
         assert!(!s.contains(foreign), "ESP32-C3 report mentions {foreign}:\n{s}");
     }
     assert!(s.contains("riscv32imc-unknown-none-elf"), "C3 must name its target:\n{s}");
@@ -1088,7 +1091,7 @@ fn list_stacks_reports_non_esp_frameworks_and_gaps() {
     assert!(s.contains("[gap]"), "the blocking stack should show its embassy gap:\n{s}");
     // The per-stack flashing/logging support subset is reported (so the matrix
     // harness enumerates each stack's axes from here, not the universal catalog).
-    assert!(s.contains("flashing: picotool, probe-rs"), "rp2040 flashing subset:\n{s}");
+    assert!(s.contains("flashing: elf2uf2-rs, uf2deploy, probe-rs"), "rp2040 flashing subset:\n{s}");
     assert!(s.contains("logging: none, defmt"), "rp2040 logging subset:\n{s}");
     assert!(!s.contains("espflash"), "espflash is not an rp2040 flash tool:\n{s}");
 }

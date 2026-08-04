@@ -14,8 +14,8 @@
 # THE MATRIX IS NOT HARDCODED. Every axis is harvested at run time from the
 # tool's own `--list-chips` / `--list-stacks` / `--list-templates` output. Each
 # stack's flashing/logging/framework axes come from its OWN `--list-stacks`
-# lines (the per-stack SUPPORTED subset, e.g. rp2040 flashing = picotool,
-# probe-rs) -- never the universal catalog -- so an unsupported tool for a stack
+# lines (the per-stack SUPPORTED subset, e.g. rp2040 flashing = elf2uf2-rs,
+# uf2deploy, probe-rs) -- never the universal catalog -- so an unsupported tool for a stack
 # is never enumerated, only the real gaps are. Add a variant, a stack, a
 # template or a support entry to src/registry.rs and this script picks it up
 # with no edit.
@@ -179,11 +179,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 HAVE_ESP_GENERATE=0;  have esp-generate                       && HAVE_ESP_GENERATE=1
 HAVE_CARGO_GEN=0;     cargo generate --version >/dev/null 2>&1 && HAVE_CARGO_GEN=1
 HAVE_ESPFLASH=0;      have espflash                           && HAVE_ESPFLASH=1
-HAVE_PICOTOOL=0;      have picotool                           && HAVE_PICOTOOL=1
 HAVE_ELF2UF2=0;       have elf2uf2-rs                         && HAVE_ELF2UF2=1
+HAVE_UF2DEPLOY=0;     have uf2deploy                          && HAVE_UF2DEPLOY=1
 HAVE_HF2=0;           have hf2                                && HAVE_HF2=1
-HAVE_OBJCOPY=0;       have rust-objcopy                       && HAVE_OBJCOPY=1
-HAVE_UF2CONV=0;       have uf2conv.py                         && HAVE_UF2CONV=1
 HAVE_PROBE_RS=0;      have probe-rs                           && HAVE_PROBE_RS=1
 
 # Custom (espup-linked) toolchains are not listable with `rustup target list
@@ -222,10 +220,9 @@ _tool_line() { # name, have, install-hint
 _tool_line "esp-generate (esp-hal backend)" "$HAVE_ESP_GENERATE" "cargo install esp-generate --version 1.3.0 --locked"
 _tool_line "cargo-generate (esp-idf backend)" "$HAVE_CARGO_GEN"  "cargo install cargo-generate --locked"
 _tool_line "espflash (ESP flashing)"        "$HAVE_ESPFLASH"     "cargo install espflash --locked"
-_tool_line "picotool (RP2040/RP2350 flash)" "$HAVE_PICOTOOL"     "brew install picotool"
+_tool_line "elf2uf2-rs (RP2040/RP2350 flash)" "$HAVE_ELF2UF2"    "cargo install elf2uf2-rs"
+_tool_line "uf2deploy (nRF/SAMD UF2 flash)" "$HAVE_UF2DEPLOY"    "cargo install uf2deploy"
 _tool_line "hf2 (SAMD21 flash)"             "$HAVE_HF2"          "cargo install hf2-cli"
-_tool_line "rust-objcopy (ELF->bin)"        "$HAVE_OBJCOPY"      "cargo install cargo-binutils && rustup component add llvm-tools"
-_tool_line "uf2conv.py (bin->UF2)"          "$HAVE_UF2CONV"      "curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py && curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json  # then chmod +x and put both on PATH"
 
 # ---------------------------------------------------------------------------
 # 2. harvest the registry from the tool's own output
@@ -655,19 +652,8 @@ flash_rp() { # id chip elf  (RP2040 / RP2350 -- BOOTSEL mass storage)
     *rp2350) vol=RP2350 ;;
     *) vol=RPI-RP2 ;;
   esac
-  if [ $HAVE_PICOTOOL = 0 ]; then
-    if [ $HAVE_ELF2UF2 = 1 ] && [ "$vol" = RPI-RP2 ]; then
-      pause_for "Hold the BOOT ('B') button on the $chip and plug in USB-C.
-  (Already plugged in? hold B, tap RESET, release B.)
-  A volume named '$vol' must appear in Finder."
-      wait_for_volume "$vol" || { FLASH_MSG="/Volumes/$vol never appeared -- board is not in BOOTSEL mode"; return 1; }
-      if run_flash "$WORK/logs/$id.flash.log" elf2uf2-rs deploy "$elf"; then
-        FLASH_MSG="elf2uf2-rs deploy -> /Volumes/$vol reported success"; return 0
-      fi
-      FLASH_MSG="elf2uf2-rs deploy failed (see $WORK/logs/$id.flash.log)"; return 1
-    fi
-    FLASH_MSG='picotool not installed -- brew install picotool  (elf2uf2-rs is a fallback for RP2040 ONLY; its RP2350 output is known-broken, JoNil/elf2uf2-rs#38)'
-    return 3
+  if [ $HAVE_ELF2UF2 = 0 ]; then
+    FLASH_MSG='elf2uf2-rs not installed -- cargo install elf2uf2-rs'; return 3
   fi
   pause_for "Hold the BOOT ('B') button on the $chip and plug in USB-C.
   (Already plugged in? hold B, tap RESET, release B.)
@@ -675,13 +661,14 @@ flash_rp() { # id chip elf  (RP2040 / RP2350 -- BOOTSEL mass storage)
   if ! wait_for_volume "$vol"; then
     FLASH_MSG="/Volumes/$vol never appeared -- board is not in BOOTSEL mode"; return 1
   fi
-  # picotool reads the ELF directly. `-t elf` is REQUIRED: cargo's output file
-  # has no extension and picotool otherwise infers the type from it.
-  # -u skip-identical sectors, -v verify the write, -x reboot into the app.
-  if run_flash "$WORK/logs/$id.flash.log" picotool load -u -v -x -t elf "$elf"; then
-    FLASH_MSG='picotool load -t elf reported success (write verified by picotool -v)'; return 0
+  # elf2uf2-rs -d converts the ELF to UF2 and copies it onto the mounted BOOTSEL
+  # drive in one step -- no probe, no separate objcopy. NOTE: elf2uf2-rs' RP2350
+  # output has been reported broken upstream (JoNil/elf2uf2-rs#38); if an RP2350
+  # write fails here, check that issue before suspecting the generated firmware.
+  if run_flash "$WORK/logs/$id.flash.log" elf2uf2-rs -d "$elf"; then
+    FLASH_MSG="elf2uf2-rs -d -> /Volumes/$vol reported success"; return 0
   fi
-  FLASH_MSG="picotool load failed (see $WORK/logs/$id.flash.log)"; return 1
+  FLASH_MSG="elf2uf2-rs -d failed (see $WORK/logs/$id.flash.log)"; return 1
 }
 
 flash_nrf() { # id chip elf  (Adafruit nRF52 UF2 bootloader, double-tap RESET)
@@ -713,45 +700,27 @@ flash_nrf() { # id chip elf  (Adafruit nRF52 UF2 bootloader, double-tap RESET)
     FLASH_MSG="UNSAFE, refusing: this ELF is linked below the application window (entry 0x$ent < 0x27000). The stock XIAO nRF52840 ships the Adafruit nRF52 bootloader with SoftDevice S140 7.3.0 -- MBR at 0x0, SoftDevice up to 0x27000, application from 0x27000. Written at 0x0 this image destroys the MBR+SoftDevice (recovery needs SWD, and there is no probe); relocated to 0x27000 every absolute address in it is wrong. Fix: relink at ORIGIN = 0x27000, LENGTH = 780K (the window ends at USER_FLASH_END = 0xEA000, not at the bootloader at 0xF4000), then this route runs automatically"
     return 4
   fi
-  if [ $HAVE_OBJCOPY = 0 ]; then
-    FLASH_MSG='rust-objcopy not installed -- cargo install cargo-binutils && rustup component add llvm-tools'; return 3
+  if [ $HAVE_UF2DEPLOY = 0 ]; then
+    FLASH_MSG='uf2deploy not installed -- cargo install uf2deploy'; return 3
   fi
-  if [ $HAVE_UF2CONV = 0 ]; then
-    FLASH_MSG='uf2conv.py not installed -- fetch utils/uf2conv.py AND utils/uf2families.json from github.com/microsoft/uf2 and put both on PATH (uf2conv.py needs the json next to it)'; return 3
-  fi
-  local bin="$WORK/projects/$id.bin" uf2="$WORK/projects/$id.uf2"
-  rust-objcopy -O binary "$elf" "$bin" || { FLASH_MSG='rust-objcopy -O binary failed'; return 1; }
-  # Upper bound of the same invariant. The .bin is the exact byte range that
-  # gets written, based at 0x27000, so its size is the honest measure of how
-  # far the image reaches -- more so than any single section address.
-  # ghostfat.c drops blocks at or above USER_FLASH_END rather than failing the
-  # write, so an oversized image would report success with its tail missing.
-  local binsz; binsz=$(wc -c < "$bin" | tr -d ' ')
-  local binend=$(( 0x27000 + binsz ))
-  if [ "$binend" -gt $((0xEA000)) ]; then
-    FLASH_MSG=$(printf 'UNSAFE, refusing: image is %s bytes, reaching 0x%X -- past USER_FLASH_END (0xEA000). The Adafruit UF2 bootloader silently DROPS blocks at or above that address (ghostfat.c in_app_space), so this would flash "successfully" with its tail missing. The application window is 0x27000..0xEA000 = 780 KiB' "$binsz" "$binend")
-    return 4
-  fi
-  uf2conv.py "$bin" -c -b 0x27000 -f 0xADA52840 -o "$uf2" || { FLASH_MSG='uf2conv.py failed'; return 1; }
+  # Upper bound of the same invariant, now delegated to the tool. The Adafruit
+  # UF2 bootloader silently DROPS blocks at or above USER_FLASH_END (0xEA000)
+  # rather than failing (ghostfat.c in_app_space), so an oversized image would
+  # "flash" with its tail missing. The old route measured the raw .bin to catch
+  # this; uf2deploy converts the ELF directly, so we rely on it emitting UF2 from
+  # the ELF's own load addresses -- which memory_nrf52840.x links into the
+  # 0x27000..0xEA000 (780 KiB) application window.
   pause_for "Double-tap the RESET button on the $chip (two taps within ~500 ms).
   A volume named '$vol' must appear in Finder."
   wait_for_volume "$vol" || { FLASH_MSG="/Volumes/$vol never appeared -- board did not enter the UF2 bootloader"; return 1; }
-  # `cp -X` skips extended attributes: a plain `cp` to the FAT bootloader volume
-  # fails its xattr step on macOS and would false-FAIL an otherwise good write.
-  # The board also reboots the instant the last UF2 block lands, so cp can lose
-  # the volume mid-copy -- either way cp's exit status is unreliable here. The
-  # authoritative, probe-free success signal is the volume UNMOUNTING (checked
-  # below), so a copy error is deliberately not fatal on its own.
-  cp -X "$uf2" "/Volumes/$vol/" 2>/dev/null || true
-  sync
-  # The UF2 bootloader reboots into the app as soon as the write completes, so
-  # the volume disappearing is the only success signal available without a probe.
-  local i=0
-  while [ $i -lt 15 ]; do [ -d "/Volumes/$vol" ] || break; sleep 1; i=$((i+1)); done
-  if [ -d "/Volumes/$vol" ]; then
-    FLASH_MSG="UF2 copied but /Volumes/$vol did not unmount -- the bootloader may have rejected the image"; return 1
+  # uf2deploy converts the ELF to UF2 (family nrf52840 == 0xADA52840) and copies
+  # it to the mounted bootloader volume in one step. `--path auto` locates the
+  # drive, sidestepping the macOS FAT-volume xattr quirk that made a plain `cp`
+  # unreliable and let the board reboot mid-copy.
+  if run_flash "$WORK/logs/$id.flash.log" uf2deploy deploy --family nrf52840 --path auto "$elf"; then
+    FLASH_MSG="uf2deploy deploy (family nrf52840) -> /Volumes/$vol reported success"; return 0
   fi
-  FLASH_MSG="UF2 (family 0xADA52840, base 0x27000) written; /Volumes/$vol unmounted"; return 0
+  FLASH_MSG="uf2deploy deploy failed (see $WORK/logs/$id.flash.log)"; return 1
 }
 
 flash_samd() { # id chip elf  (Seeed uf2-samdx1 bootloader, volume "Arduino")
@@ -778,21 +747,22 @@ flash_samd() { # id chip elf  (Seeed uf2-samdx1 bootloader, volume "Arduino")
     fi
     FLASH_MSG="hf2 failed (see $WORK/logs/$id.flash.log). macOS note: Terminal needs Input Monitoring permission for HID access"; return 1
   fi
-  if [ $HAVE_OBJCOPY = 0 ] || [ $HAVE_UF2CONV = 0 ]; then
-    FLASH_MSG='no SAMD21 flasher -- cargo install hf2-cli  (or: cargo install cargo-binutils && rustup component add llvm-tools, plus uf2conv.py + uf2families.json from github.com/microsoft/uf2)'; return 3
+  # No HID flasher -- fall back to the shared UF2 route (uf2deploy), which the
+  # registry now lists as a SAMD21 flashing option alongside hf2.
+  if [ $HAVE_UF2DEPLOY = 0 ]; then
+    FLASH_MSG='no SAMD21 flasher -- cargo install hf2-cli  (or: cargo install uf2deploy for the UF2 mass-storage route)'; return 3
   fi
-  local bin="$WORK/projects/$id.bin" uf2="$WORK/projects/$id.uf2"
-  rust-objcopy -O binary "$elf" "$bin" || { FLASH_MSG='rust-objcopy -O binary failed'; return 1; }
-  uf2conv.py "$bin" -c -b 0x2000 -f 0x68ed2b88 -o "$uf2" || { FLASH_MSG='uf2conv.py failed'; return 1; }
   pause_for "Short the two RST pads on the $chip twice quickly. A volume named '$vol' appears."
   wait_for_volume "$vol" || { FLASH_MSG="/Volumes/$vol never appeared"; return 1; }
-  # cp -X: skip extended attributes, which a plain cp cannot write to the FAT
-  # bootloader volume on macOS (it would report failure for an otherwise good write).
-  cp -X "$uf2" "/Volumes/$vol/" 2>/dev/null || true
-  sync
-  local i=0
-  while [ $i -lt 15 ]; do [ -d "/Volumes/$vol" ] || break; sleep 1; i=$((i+1)); done
-  FLASH_MSG="UF2 (family 0x68ed2b88, base 0x2000) written to /Volumes/$vol"; return 0
+  # uf2deploy converts the ELF to UF2 (family samd21 == 0x68ed2b88, app base
+  # 0x2000 from the ELF's own load addresses) and copies it to the mounted
+  # volume in one step. `--path auto` handles the macOS FAT-volume xattr quirk
+  # that made a plain `cp` unreliable. NOTE: confirm uf2deploy's SAMD family
+  # name (`samd21`) against `uf2deploy --help` for your version.
+  if run_flash "$WORK/logs/$id.flash.log" uf2deploy deploy --family samd21 --path auto "$elf"; then
+    FLASH_MSG='uf2deploy deploy (family samd21) reported success'; return 0
+  fi
+  FLASH_MSG="uf2deploy deploy failed (see $WORK/logs/$id.flash.log)"; return 1
 }
 
 run_flash_mode() {

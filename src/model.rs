@@ -752,7 +752,7 @@ pub fn equivalent_command(cfg: &Config) -> String {
     // and only when a choice differs from the STACK's default (keep the command
     // terse but faithful/runnable). The default to compare against is the stack's
     // own — on non-ESP the flashing default is the board's no-probe route
-    // (picotool/uf2/hf2), not the universal espflash — so an unmodified selection
+    // (elf2uf2-rs/uf2deploy/hf2), not the universal espflash — so an unmodified selection
     // never appears. No esp-generate `-o` ever appears.
     let esp_groups = option_groups_apply(cfg);
     for (cat, chosen) in [
@@ -974,8 +974,8 @@ mod tests {
         assert_eq!(Config::resolve(r).unwrap().flashing.id, "probe-rs");
 
         // The DEFAULT flashing route is the board's no-probe tool, never espflash.
-        assert_eq!(Config::resolve(raw("xiao-rp2040")).unwrap().flashing.id, "picotool");
-        assert_eq!(Config::resolve(raw("xiao-nrf52840")).unwrap().flashing.id, "uf2");
+        assert_eq!(Config::resolve(raw("xiao-rp2040")).unwrap().flashing.id, "elf2uf2-rs");
+        assert_eq!(Config::resolve(raw("xiao-nrf52840")).unwrap().flashing.id, "uf2deploy");
         assert_eq!(Config::resolve(raw("xiao-samd21")).unwrap().flashing.id, "hf2");
 
         // `--logging defmt` is accepted; `--logging log` is refused as ESP-only.
@@ -996,14 +996,14 @@ mod tests {
         let rp = registry::variant("xiao-rp2040").unwrap().default_stack();
         let esp = registry::variant("xiao-esp32c6").unwrap().stack("esp-hal").unwrap();
         let probe_rs = registry::tool_choice(ToolCategory::Flashing, "probe-rs").unwrap();
-        let picotool = registry::tool_choice(ToolCategory::Flashing, "picotool").unwrap();
+        let elf2uf2 = registry::tool_choice(ToolCategory::Flashing, "elf2uf2-rs").unwrap();
         let defmt = registry::tool_choice(ToolCategory::Logging, "defmt").unwrap();
         let none = registry::tool_choice(ToolCategory::Logging, "none").unwrap();
 
         // Cortex-M: probe-rs needs an external probe; no-probe routes and non-defmt
         // logging carry no note.
         assert!(flashing_probe_note(rp, probe_rs).is_some());
-        assert!(flashing_probe_note(rp, picotool).is_none());
+        assert!(flashing_probe_note(rp, elf2uf2).is_none());
         assert!(defmt_view_note(rp, defmt).is_some());
         assert!(defmt_view_note(rp, none).is_none());
         // ESP: built-in USB-Serial-JTAG, so even probe-rs / defmt need no external
@@ -1014,18 +1014,18 @@ mod tests {
 
     #[test]
     fn non_esp_flashing_choice_drives_the_flash_prerequisite() {
-        // Default nRF route is the UF2 pipeline (rust-objcopy + uf2conv), no probe.
+        // Default nRF route is uf2deploy (ELF -> UF2 -> bootloader volume), no probe.
         let default = prereq_ids("xiao-nrf52840", |_| {});
-        assert!(default.contains(&"rust-objcopy") && default.contains(&"uf2conv"), "{default:?}");
+        assert!(default.contains(&"uf2deploy"), "{default:?}");
         assert!(!default.contains(&"probe-rs"), "{default:?}");
         // --flashing probe-rs swaps the whole route for the probe.
         let probe = prereq_ids("xiao-nrf52840", |r| r.flashing = Some("probe-rs".into()));
         assert!(probe.contains(&"probe-rs"), "{probe:?}");
-        assert!(!probe.contains(&"rust-objcopy") && !probe.contains(&"uf2conv"), "{probe:?}");
-        // RP default is picotool; probe-rs swaps it there too.
-        assert!(prereq_ids("xiao-rp2040", |_| {}).contains(&"picotool"));
+        assert!(!probe.contains(&"uf2deploy"), "{probe:?}");
+        // RP default is elf2uf2-rs; probe-rs swaps it there too.
+        assert!(prereq_ids("xiao-rp2040", |_| {}).contains(&"elf2uf2-rs"));
         let rp_probe = prereq_ids("xiao-rp2040", |r| r.flashing = Some("probe-rs".into()));
-        assert!(rp_probe.contains(&"probe-rs") && !rp_probe.contains(&"picotool"), "{rp_probe:?}");
+        assert!(rp_probe.contains(&"probe-rs") && !rp_probe.contains(&"elf2uf2-rs"), "{rp_probe:?}");
     }
 
     #[test]
@@ -1343,7 +1343,7 @@ mod tests {
 
     #[test]
     fn parity_non_esp_flashing_and_logging_round_trip() {
-        // The stack default (picotool / none) is omitted — a bare non-ESP command
+        // The stack default (elf2uf2-rs / none) is omitted — a bare non-ESP command
         // stays terse even though flashing/logging are now live.
         let c = cmd_for(|r| r.chip = "xiao-rp2040".to_string());
         assert_eq!(c, "xiao-generate --chip xiao-rp2040");
@@ -1360,7 +1360,7 @@ mod tests {
         // Passing the stack default flashing explicitly still round-trips to terse.
         let c = cmd_for(|r| {
             r.chip = "xiao-nrf52840".to_string();
-            r.flashing = Some("uf2".to_string());
+            r.flashing = Some("uf2deploy".to_string());
         });
         assert_eq!(c, "xiao-generate --chip xiao-nrf52840");
     }
@@ -1748,12 +1748,14 @@ mod tests {
 
     /// THE acceptance property: a project is only ever told about tools it can
     /// actually use. An RP2040 project must not mention espup or espflash; an
-    /// esp-idf project must not mention picotool.
+    /// esp-idf project must not mention a non-ESP flasher like elf2uf2-rs.
     #[test]
     fn prerequisites_are_scoped_to_the_resolved_config() {
         let rp = prereq_ids("xiao-rp2040", |_| {});
-        assert_eq!(rp, vec!["thumbv6m-none-eabi", "picotool"]);
-        for foreign in ["xtensa-esp32s3-none-elf", "espflash", "ldproxy", "hf2", "uf2conv"] {
+        assert_eq!(rp, vec!["thumbv6m-none-eabi", "elf2uf2-rs"]);
+        // hf2 (SAMD) and the ESP tools stay foreign to RP; uf2deploy is a shared
+        // UF2 flasher (also an RP route), so it is not a foreign-tool marker here.
+        for foreign in ["xtensa-esp32s3-none-elf", "espflash", "ldproxy", "hf2"] {
             assert!(!rp.contains(&foreign), "RP2040 must not mention {foreign}: {rp:?}");
         }
 
@@ -1762,7 +1764,8 @@ mod tests {
             idf,
             vec!["riscv32imc-esp-espidf", "ldproxy", "python3", "git", "espflash"]
         );
-        for foreign in ["picotool", "hf2", "uf2conv", "probe-rs"] {
+        // esp-idf must not name any non-ESP flasher (the UF2/HID routes) or probe-rs.
+        for foreign in ["elf2uf2-rs", "uf2deploy", "hf2", "probe-rs"] {
             assert!(!idf.contains(&foreign), "esp-idf must not mention {foreign}: {idf:?}");
         }
     }
@@ -1819,10 +1822,10 @@ mod tests {
     #[test]
     fn non_esp_boards_get_their_own_usb_flash_route() {
         for (chip, want) in [
-            ("xiao-rp2040", vec!["picotool"]),
-            ("xiao-rp2350", vec!["picotool"]),
-            ("xiao-nrf52840", vec!["rust-objcopy", "uf2conv"]),
-            ("xiao-nrf52840-sense", vec!["rust-objcopy", "uf2conv"]),
+            ("xiao-rp2040", vec!["elf2uf2-rs"]),
+            ("xiao-rp2350", vec!["elf2uf2-rs"]),
+            ("xiao-nrf52840", vec!["uf2deploy"]),
+            ("xiao-nrf52840-sense", vec!["uf2deploy"]),
             ("xiao-samd21", vec!["hf2"]),
         ] {
             let ids = prereq_ids(chip, |_| {});

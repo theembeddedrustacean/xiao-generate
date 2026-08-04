@@ -70,9 +70,10 @@ pub struct Cli {
     pub power_board: bool,
 
     /// Flashing tool. Each device defaults to its no-probe USB route — espflash
-    /// (ESP), picotool (RP BOOTSEL), or the UF2 bootloader (nRF/SAMD21) — with
-    /// `probe-rs` the external-SWD-debug-probe alternative everywhere. Not
-    /// user-selectable on the esp-idf stack (the template fixes it).
+    /// (ESP), elf2uf2-rs (RP BOOTSEL), uf2deploy (nRF UF2), hf2 (SAMD21) — with
+    /// `probe-rs` the external-SWD-debug-probe alternative everywhere. Every
+    /// choice installs with `cargo install`. See `--list-stacks --chip <id>` for
+    /// a board's options. Not user-selectable on the esp-idf stack.
     #[arg(long, value_name = "TOOL")]
     pub flashing: Option<String>,
 

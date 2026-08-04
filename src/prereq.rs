@@ -135,9 +135,9 @@ fn lines(argv: &[&str]) -> Vec<String> {
 
 /// Whether `argv` names an executable that could actually be run.
 ///
-/// The exit status is **deliberately ignored**: `picotool --version` exits 255
-/// and `ldproxy` exits 101 for every invocation (it is a linker shim with no
-/// CLI), yet both are installed and working. What we want to know is exactly
+/// The exit status is **deliberately ignored**: `ldproxy` exits 101 for every
+/// invocation (it is a linker shim with no CLI), yet it is installed and
+/// working. What we want to know is exactly
 /// what `command -v` answers — does this executable resolve on `PATH` — and
 /// `Command::output` distinguishes that (an `Err`, typically `NotFound`) from a
 /// program that ran and disliked its arguments (`Ok` with a bad status).
@@ -192,7 +192,7 @@ mod tests {
 
     /// The reason `spawns` ignores exit status. `false` is POSIX-guaranteed to
     /// exist and to exit 1 — an "installed tool that exits non-zero", which is
-    /// exactly the picotool/ldproxy shape. If this ever regressed to checking
+    /// exactly the ldproxy shape. If this ever regressed to checking
     /// the status, every ldproxy check would report a false MISSING.
     #[test]
     fn a_tool_that_exits_non_zero_is_still_installed() {

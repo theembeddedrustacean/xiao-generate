@@ -449,13 +449,13 @@ pub struct ToolChoice {
     /// (internal; never surfaced). `&[]` for "none"/unmapped choices.
     pub esp_options: &'static [&'static str],
     /// [`PREREQS`] ids this choice needs on the host. Populated for the flashing
-    /// tools (picking `probe-rs` over `picotool` genuinely changes what must be
+    /// tools (picking `probe-rs` over `elf2uf2-rs` genuinely changes what must be
     /// installed); `&[]` for the logging/framework catalogs, whose choices are
     /// plain cargo dependencies and add no host tool.
     pub prereqs: &'static [&'static str],
     /// Whether this flashing tool drives the board over an external SWD debug
-    /// probe (only `probe-rs`). Every no-probe route — espflash, picotool, the two
-    /// UF2 bootloader flashers — is `false`. Combined with [`Stack::builtin_debug`]
+    /// probe (only `probe-rs`). Every no-probe route — espflash and the cargo UF2
+    /// flashers (elf2uf2-rs/uf2deploy/hf2) — is `false`. Combined with [`Stack::builtin_debug`]
     /// this decides the "needs an external debug probe" note: `probe-rs` needs one
     /// on the Cortex-M parts but NOT on ESP (built-in USB-Serial-JTAG). `false`
     /// for the logging/framework catalogs, which are not flashing tools.
@@ -463,17 +463,19 @@ pub struct ToolChoice {
 }
 
 /// Flashing tools (universal). Two families: the **no-probe** routes that need
-/// only the USB-C cable — espflash (ESP), picotool (RP BOOTSEL), and the two UF2
-/// bootloader flashers (uf2conv for the nRF Adafruit bootloader, hf2 for the
-/// SAMD21/UF2 HID bootloader) — and `probe-rs`, the external-SWD-debug-probe path.
-/// Each stack's support list leads with its no-probe route (the default) so the
-/// out-of-the-box flash needs no extra hardware.
+/// only the USB-C cable and the board's own bootloader — espflash (ESP) and the
+/// cargo-native UF2 flashers (`elf2uf2-rs` for RP BOOTSEL, `uf2deploy` for the
+/// nRF Adafruit bootloader and any UF2 family, `hf2` for the SAMD21 HID
+/// bootloader) — and `probe-rs`, the external-SWD-debug-probe path. **Every
+/// option installs with `cargo install`** — no Homebrew, no Python. Boards that
+/// share the UF2 format offer more than one no-probe choice; each stack's support
+/// list leads with its default so the out-of-the-box flash needs no extra hardware.
 pub const FLASHING_TOOLS: &[ToolChoice] = &[
     ToolChoice { id: "espflash", display: "espflash", esp_options: &["esp-backtrace"], prereqs: &["espflash"], needs_probe: false },
     ToolChoice { id: "probe-rs", display: "probe-rs", esp_options: &["probe-rs", "panic-rtt-target"], prereqs: &["probe-rs"], needs_probe: true },
-    ToolChoice { id: "picotool", display: "picotool", esp_options: &[], prereqs: &["picotool"], needs_probe: false },
-    ToolChoice { id: "uf2", display: "UF2 bootloader", esp_options: &[], prereqs: &["rust-objcopy", "uf2conv"], needs_probe: false },
-    ToolChoice { id: "hf2", display: "hf2 (UF2 bootloader)", esp_options: &[], prereqs: &["hf2"], needs_probe: false },
+    ToolChoice { id: "elf2uf2-rs", display: "elf2uf2-rs (UF2)", esp_options: &[], prereqs: &["elf2uf2-rs"], needs_probe: false },
+    ToolChoice { id: "uf2deploy", display: "uf2deploy (UF2)", esp_options: &[], prereqs: &["uf2deploy"], needs_probe: false },
+    ToolChoice { id: "hf2", display: "hf2 (UF2)", esp_options: &[], prereqs: &["hf2"], needs_probe: false },
 ];
 
 /// Logging frontends (universal). On esp-hal, `log` is mutually exclusive with a
@@ -651,7 +653,7 @@ pub fn default_editor() -> &'static Editor {
 // whatever `model::prerequisites` selects out of this catalog. Selection is
 // derived from the resolved `Config` (target triple → toolchain, stack → build
 // tools, flashing tool / stack → flash tools), so an `xiao-rp2040` project never
-// mentions espup and an esp-idf project never mentions picotool.
+// mentions espup and an esp-idf project never mentions elf2uf2-rs.
 //
 // Scope note: these are the *generated project's* prerequisites, not
 // xiao-generate's own. The backend generators (esp-generate, cargo-generate) are
@@ -665,10 +667,9 @@ pub fn default_editor() -> &'static Editor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probe {
     /// Present iff this argv can be **spawned** — i.e. the executable resolves on
-    /// `PATH`. The exit status is deliberately ignored: several of these tools
-    /// exit non-zero for a version query yet are perfectly installed (`picotool
-    /// --version` exits 255, and `ldproxy` exits 101 for *every* invocation — it
-    /// is a linker shim, not a CLI). This is the same question `command -v`
+    /// `PATH`. The exit status is deliberately ignored: some of these tools
+    /// exit non-zero for a version query yet are perfectly installed (`ldproxy`
+    /// exits 101 for *every* invocation — it is a linker shim, not a CLI). This is the same question `command -v`
     /// answers, which is what `scripts/matrix.sh` uses. The argv is still chosen
     /// to be a harmless, instant, side-effect-free query, never a bare
     /// invocation that might go looking for a board.
@@ -878,13 +879,20 @@ pub const PREREQS: &[Prereq] = &[
         note: Some("needs an SWD debug probe attached — espflash/UF2 need only the USB-C cable"),
     },
     Prereq {
-        id: "picotool",
-        display: "picotool",
-        // `picotool --version` exits 255; the subcommand is `picotool version`.
-        probe: Probe::Binary(&["picotool", "version"]),
-        install: "brew install picotool",
+        id: "elf2uf2-rs",
+        display: "elf2uf2-rs",
+        probe: Probe::Binary(&["elf2uf2-rs", "--version"]),
+        install: "cargo install elf2uf2-rs",
         need: Need::Flash,
-        note: Some("flashes over USB in BOOTSEL mode (hold B while plugging in) — no probe needed"),
+        note: Some("converts the ELF to UF2 and copies it to the BOOTSEL drive (hold B while plugging in) — no probe needed"),
+    },
+    Prereq {
+        id: "uf2deploy",
+        display: "uf2deploy",
+        probe: Probe::Binary(&["uf2deploy", "--version"]),
+        install: "cargo install uf2deploy",
+        need: Need::Flash,
+        note: Some("converts the ELF to UF2 and copies it to the mounted UF2 drive (nRF: double-tap RESET) — no probe needed"),
     },
     Prereq {
         id: "hf2",
@@ -895,24 +903,6 @@ pub const PREREQS: &[Prereq] = &[
         note: Some(
             "talks to the UF2 bootloader over HID (short the RST pads twice) — no probe needed",
         ),
-    },
-    Prereq {
-        id: "rust-objcopy",
-        display: "rust-objcopy (cargo-binutils)",
-        probe: Probe::Binary(&["rust-objcopy", "--version"]),
-        install: "cargo install cargo-binutils && rustup component add llvm-tools",
-        need: Need::Flash,
-        note: None,
-    },
-    Prereq {
-        id: "uf2conv",
-        display: "uf2conv.py (+ uf2families.json)",
-        probe: Probe::Binary(&["uf2conv.py", "-h"]),
-        install: "curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2conv.py \
-                  && curl -LO https://raw.githubusercontent.com/microsoft/uf2/master/utils/uf2families.json \
-                  && chmod +x uf2conv.py   # then put BOTH on PATH",
-        need: Need::Flash,
-        note: Some("uf2conv.py reads uf2families.json from beside itself — both files must be installed"),
     },
 ];
 
@@ -962,9 +952,9 @@ const IDF_NONE: &[&str] = &[];
 ///    it is absent here; defmt is wired into the direct scaffold.
 ///  - FRAMEWORK: `none` generates the blocking/no-executor body, `embassy` the
 ///    executor body — but only on an embassy HAL, see `Scaffold::framework_gaps`.
-const RP_FLASHING: &[&str] = &["picotool", "probe-rs"];
-const NRF_FLASHING: &[&str] = &["uf2", "probe-rs"];
-const SAMD_FLASHING: &[&str] = &["hf2", "probe-rs"];
+const RP_FLASHING: &[&str] = &["elf2uf2-rs", "uf2deploy", "probe-rs"];
+const NRF_FLASHING: &[&str] = &["uf2deploy", "probe-rs"];
+const SAMD_FLASHING: &[&str] = &["hf2", "uf2deploy", "probe-rs"];
 const ARM_LOGGING: &[&str] = &["none", "defmt"];
 const RP_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
 const NRF_FRAMEWORKS: &[&str] = &["none", "embassy", "rtic"];
@@ -2052,7 +2042,7 @@ mod tests {
         // Three device-agnostic catalogs, in the documented order.
         assert_eq!(
             FLASHING_TOOLS.iter().map(|c| c.id).collect::<Vec<_>>(),
-            vec!["espflash", "probe-rs", "picotool", "uf2", "hf2"]
+            vec!["espflash", "probe-rs", "elf2uf2-rs", "uf2deploy", "hf2"]
         );
         assert_eq!(
             LOGGING.iter().map(|c| c.id).collect::<Vec<_>>(),
@@ -2067,7 +2057,8 @@ mod tests {
         assert_eq!(ToolCategory::Logging.default_choice().id, "none");
         assert_eq!(ToolCategory::Framework.default_choice().id, "none");
         // Exactly one flashing tool drives an external probe (probe-rs); every
-        // other route — espflash, picotool, the two UF2 flashers — is no-probe.
+        // other route — espflash, the two UF2 flashers (elf2uf2-rs, uf2deploy),
+        // hf2 — is no-probe.
         for c in FLASHING_TOOLS {
             assert_eq!(c.needs_probe, c.id == "probe-rs", "needs_probe wrong for {}", c.id);
         }
@@ -2113,13 +2104,13 @@ mod tests {
         // Each non-ESP stack leads its flashing support with the board's no-probe
         // USB/UF2 route (the default), then probe-rs; logging is none/defmt (no
         // esp-println `log`).
-        assert_eq!(rp.support(ToolCategory::Flashing), &["picotool", "probe-rs"]);
+        assert_eq!(rp.support(ToolCategory::Flashing), &["elf2uf2-rs", "uf2deploy", "probe-rs"]);
         assert_eq!(rp.support(ToolCategory::Logging), &["none", "defmt"]);
-        assert_eq!(rp.default_tool(ToolCategory::Flashing).unwrap().id, "picotool");
+        assert_eq!(rp.default_tool(ToolCategory::Flashing).unwrap().id, "elf2uf2-rs");
         let nrf = variant("xiao-nrf52840").unwrap().default_stack();
-        assert_eq!(nrf.support(ToolCategory::Flashing), &["uf2", "probe-rs"]);
+        assert_eq!(nrf.support(ToolCategory::Flashing), &["uf2deploy", "probe-rs"]);
         let samd = variant("xiao-samd21").unwrap().default_stack();
-        assert_eq!(samd.support(ToolCategory::Flashing), &["hf2", "probe-rs"]);
+        assert_eq!(samd.support(ToolCategory::Flashing), &["hf2", "uf2deploy", "probe-rs"]);
         assert_eq!(samd.support(ToolCategory::Logging), &["none", "defmt"]);
         assert_eq!(samd.support(ToolCategory::Framework), &["none", "rtic"]);
     }
@@ -2327,22 +2318,24 @@ mod tests {
                 .unwrap()
                 .prereqs
         };
-        // RP2040/RP2350: picotool reads the ELF directly (BOOTSEL mass storage).
+        // RP2040/RP2350: elf2uf2-rs converts the ELF and drops the UF2 onto the
+        // BOOTSEL mass-storage volume in one step.
         for (chip, stacks) in [
             ("xiao-rp2040", ["rp2040-hal", "embassy-rp"]),
             ("xiao-rp2350", ["rp235x-hal", "embassy-rp"]),
         ] {
             for s in stacks {
-                assert_eq!(default_route(chip, s), &["picotool"], "{chip}/{s}");
+                assert_eq!(default_route(chip, s), &["elf2uf2-rs"], "{chip}/{s}");
             }
         }
-        // nRF52840: ELF -> raw bin (rust-objcopy) -> UF2 (uf2conv.py).
+        // nRF52840: uf2deploy converts the ELF and copies the UF2 to the
+        // double-tap bootloader volume in one step.
         for (chip, stacks) in [
             ("xiao-nrf52840", ["nrf-hal", "embassy-nrf"]),
             ("xiao-nrf52840-sense", ["nrf-hal", "embassy-nrf"]),
         ] {
             for s in stacks {
-                assert_eq!(default_route(chip, s), &["rust-objcopy", "uf2conv"], "{chip}/{s}");
+                assert_eq!(default_route(chip, s), &["uf2deploy"], "{chip}/{s}");
             }
         }
         // SAMD21: hf2 takes the ELF directly over HID.

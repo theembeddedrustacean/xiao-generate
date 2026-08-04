@@ -1558,10 +1558,14 @@ mod tests {
             "flashing/logging are live now — no display-only header reason:\n{s}"
         );
 
-        // FLASHING: the board's supported tools only (picotool default + probe-rs).
-        assert!(s.contains("(•) picotool"), "picotool is the RP flash default:\n{s}");
+        // FLASHING: the board's supported tools only (elf2uf2-rs default, then the
+        // shared uf2deploy UF2 route + probe-rs).
+        assert!(s.contains("(•) elf2uf2-rs"), "elf2uf2-rs is the RP flash default:\n{s}");
+        assert!(s.contains("( ) uf2deploy"), "uf2deploy offered as the other UF2 route:\n{s}");
         assert!(s.contains("( ) probe-rs"), "probe-rs offered as the probe route:\n{s}");
-        for absent in ["espflash", "UF2 bootloader", "hf2 ("] {
+        // Wrong-device flashers for RP: espflash (ESP) and hf2 (SAMD). uf2deploy is
+        // shared, so it is intentionally NOT in this list.
+        for absent in ["espflash", "hf2 ("] {
             assert!(!s.contains(absent), "wrong-device flasher `{absent}` must not appear:\n{s}");
         }
         // probe-rs carries the external-probe hint off ESP.
@@ -1609,7 +1613,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("non-ESP stack {stack_idx} must resolve, got: {e}"));
             assert!(matches!(readiness, Readiness::Ready), "non-ESP generatable (stack {stack_idx})");
             assert_eq!(cfg.variant.id, "xiao-rp2040");
-            assert_eq!(cfg.flashing.id, "picotool", "forwarded flashing is the no-probe default");
+            assert_eq!(cfg.flashing.id, "elf2uf2-rs", "forwarded flashing is the no-probe default");
             assert_eq!(cfg.logging.id, "none", "forwarded logging default is none");
         }
     }
@@ -1619,7 +1623,7 @@ mod tests {
     #[test]
     fn non_esp_probe_rs_and_defmt_are_selectable_with_notes() {
         let mut app = app_on("xiao-nrf52840", 0); // nrf-hal
-        assert!(render(&app, W, H).contains("(•) UF2 bootloader"), "UF2 is the nRF flash default");
+        assert!(render(&app, W, H).contains("(•) uf2deploy"), "uf2deploy is the nRF flash default");
 
         app.focus = Row::Flashing(cat_pos(ToolCategory::Flashing, "probe-rs"));
         app.activate();
@@ -2196,7 +2200,7 @@ mod tests {
         none.installed = Some(std::collections::HashSet::new());
         let s = render(&none, W, H);
         assert!(s.contains("Host tools missing"), "missing note:\n{s}");
-        assert!(s.contains("picotool"), "missing note names the flash tool:\n{s}");
+        assert!(s.contains("elf2uf2-rs"), "missing note names the flash tool:\n{s}");
         assert!(s.contains("--check"), "missing note points at --check:\n{s}");
     }
 
@@ -2301,12 +2305,12 @@ mod tests {
         // (d) esp-idf std stack — sections greyed.
         dump("(d) esp-idf std — xiao-esp32s3 / esp-idf, sections greyed", &app_on("xiao-esp32s3", 1));
 
-        // (e) non-ESP, blocking HAL — FLASHING lists the no-probe route (picotool)
-        // + probe-rs with the probe note; LOGGING lists none + defmt; FRAMEWORK is
-        // live with `embassy` greyed (no time driver on the blocking HAL) and RTIC
-        // greyed.
+        // (e) non-ESP, blocking HAL — FLASHING lists the no-probe routes (elf2uf2-rs
+        // + uf2deploy) + probe-rs with the probe note; LOGGING lists none + defmt;
+        // FRAMEWORK is live with `embassy` greyed (no time driver on the blocking
+        // HAL) and RTIC greyed.
         dump(
-            "(e) non-ESP — xiao-rp2040 / rp2040-hal (flashing picotool+probe-rs, logging none+defmt, FRAMEWORK live)",
+            "(e) non-ESP — xiao-rp2040 / rp2040-hal (flashing elf2uf2-rs+uf2deploy+probe-rs, logging none+defmt, FRAMEWORK live)",
             &app_on("xiao-rp2040", 0),
         );
 

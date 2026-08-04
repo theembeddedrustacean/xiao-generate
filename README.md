@@ -1,16 +1,15 @@
 # `xiao-generate`
 
 [![crates.io](https://img.shields.io/crates/v/xiao-generate.svg)](https://crates.io/crates/xiao-generate)
-[![downloads](https://img.shields.io/crates/d/xiao-generate.svg)](https://crates.io/crates/xiao-generate)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licence)
 
 Generate ready-to-build Rust projects for the [Seeed XIAO](https://www.seeedstudio.com/xiao-series-page)
 line of SoCs & modules.
 
-At present, this tool supports Nine XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs. (A
+At present, this tool supports ten XIAO variants across three architectures, including ESP `no_std` and `std`, blocking HALs and embassy HALs. (A
 [µFerris](https://crates.io/crates/uferris-bsp) BSP mode for the ESP RISC-V parts is planned but not supported yet.)
 
-Supported variants include the XIAO-ESP32-C3/C5/C6/S3, XIAO-RP2040, XIAO-RP2350, XIAO-SAMD21, XIAO-nRF52840 and XIAO-RA4M1. Support for additional devices will be added as they become available.
+Supported variants: the XIAO-ESP32-C3/C5/C6/S3 (and S3 Sense), XIAO-RP2040, XIAO-RP2350, XIAO-nRF52840 (and Sense), and XIAO-SAMD21. Support for additional devices will be added as they become available.
 
 
 ## Quickstart
@@ -35,20 +34,41 @@ xiao-generate --name my-project
 
 ### Headless
 
-Using the CLI you can force a headless path by passing `--chip`:
+Passing `--chip` runs the CLI headlessly — no TUI. `--chip` is the only required
+flag (there is no default device); every other option falls back to a registry
+default, so `xiao-generate --chip <chip>` alone produces a working project.
 
 ```sh
 xiao-generate --chip xiao-rp2040
 ```
 
-`--chip` is **required** — there is no default device.
+**Options** (which values are valid for a given board come from the `--list-*`
+commands below):
+
+| Flag | What it sets | Values (default in **bold**) |
+| --- | --- | --- |
+| `--chip <id>` *(required)* | XIAO variant | see `--list-chips` |
+| `--stack <id>` | crate stack | per chip (`--list-stacks --chip <id>`); ESP defaults to **esp-hal** |
+| `--std` | shorthand for `--stack esp-idf` | — |
+| `--espidf-version <v>` | ESP-IDF SDK version (esp-idf stack only) | **v5.5.3**, v5.4.3, v5.3.4, master |
+| `--template <id>` / `-t` | project template | **base** + component templates per chip (`--list-templates --chip <id>`) |
+| `--framework <id>` | execution model | **none** (bare-metal), embassy (requires an embassy HAL) |
+| `--logging <id>` | logging frontend | **none**, defmt; `log` on esp-hal only |
+| `--flashing <id>` | flash tool | per chip (`--list-stacks --chip <id>`); default is the board's no-probe cargo route |
+| `--editor <id>` | rust-analyzer client config | **none**, vscode, helix, neovim, zed |
+| `--add-crate <spec>` | extra dependency (repeatable) | `name` or `name@version` |
+| `--name <name>` | crate name | derived from the variant |
+| `--out <dir>` / `-o` | output directory | `./<name>` |
+| `--yes` / `-y` | install missing backends/tools without asking | — |
+| `--no-install` | never auto-install; just print the command | — |
+
+Examples:
 
 ```sh
 # ESP32-C6, async, with defmt logging
 xiao-generate --chip xiao-esp32c6 --framework embassy --logging defmt
 
-# ESP32-C3 on the std / ESP-IDF stack (--std ≡ --stack esp-idf), pinning the
-# ESP-IDF SDK version (default v5.5.3; also v5.4.3, v5.3.4, master)
+# ESP32-C3 on the std / ESP-IDF stack, pinning the ESP-IDF SDK version
 xiao-generate --chip xiao-esp32c3 --std --espidf-version v5.4.3
 
 # S3 Sense camera template, into a named directory
@@ -58,8 +78,9 @@ xiao-generate --chip xiao-esp32s3-sense --template camera-snapshot --name cam -o
 xiao-generate --chip xiao-rp2040 --stack embassy-rp --framework embassy
 ```
 
-Useful listings: `--list-chips`, `--list-stacks [--chip X]`,
-`--list-templates [--chip X]`.
+Inspect what a board supports without generating: `--list-chips`,
+`--list-stacks [--chip <id>]`, `--list-templates [--chip <id>]`, and
+`--check --chip <id>` (reports the host prerequisites for that project).
 
 
 
@@ -71,6 +92,7 @@ Useful listings: `--list-chips`, `--list-stacks [--chip X]`,
 | --- | --- | --- | --- |
 | `xiao-esp32c3` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imc-unknown-none-elf` / `riscv32imc-esp-espidf` |
 | `xiao-esp32c6` | RISC-V | `esp-hal`, `esp-idf` | `riscv32imac-unknown-none-elf` / `riscv32imac-esp-espidf` |
+| `xiao-esp32c5` | RISC-V | `esp-hal` | `riscv32imac-unknown-none-elf` |
 | `xiao-esp32s3` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` |
 | `xiao-esp32s3-sense` | Xtensa | `esp-hal`, `esp-idf` | `xtensa-esp32s3-none-elf` / `xtensa-esp32s3-espidf` |
 | `xiao-rp2040` | Cortex-M0+ | `rp2040-hal`, `embassy-rp` | `thumbv6m-none-eabi` |
@@ -94,31 +116,24 @@ a compile-verified body: `camera-snapshot` and `sd-list` on the S3 Sense.
 
 ## Prerequisites
 
-Each board needs a build target (or toolchain) and one USB flash tool — the
-default flash routes need no debug probe. You don't have to read this: after
-generating, the tool prints exactly what your project needs and whether it is
-installed, and `xiao-generate --check --chip <chip>` prints the same without
-generating anything.
+For everything except ESP-IDF `std` development, **you don't install anything by
+hand.** `xiao-generate` works out exactly what each project needs — the right
+Rust target and a flash tool — and every one of those installs with `cargo
+install` or `rustup`. It installs its own ESP backends on first use (with your
+consent), and after generating it prints each prerequisite with a live ✔/✗ and
+the exact one-line command for anything missing; `xiao-generate --check --chip
+<chip>` reports the same without generating.
 
-| Device | Build | Flash | To use `--flashing probe-rs` |
-| --- | --- | --- | --- |
-| ESP32-C3 | `rustup target add riscv32imc-unknown-none-elf` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
-| ESP32-C5 | `rustup target add riscv32imac-unknown-none-elf` | `cargo install espflash --locked` (≥ 4.5) | `cargo install probe-rs-tools --locked` (≥ 0.31) — built-in USB-JTAG, no probe |
-| ESP32-C6 | `rustup target add riscv32imac-unknown-none-elf` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
-| ESP32-S3 (+Sense) | `cargo install espup --locked && espup install` | `cargo install espflash --locked` | `cargo install probe-rs-tools --locked` — built-in USB-JTAG, no probe |
-| RP2040 | `rustup target add thumbv6m-none-eabi` | `brew install picotool` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
-| RP2350 | `rustup target add thumbv8m.main-none-eabihf` | `brew install picotool` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
-| nRF52840 (+Sense) | `rustup target add thumbv7em-none-eabihf` | `cargo install cargo-binutils && rustup component add llvm-tools`, then put `uf2conv.py` + `uf2families.json` ([microsoft/uf2](https://github.com/microsoft/uf2) `utils/`) on `PATH` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
-| SAMD21 | `rustup target add thumbv6m-none-eabi` | `cargo install hf2-cli` | `cargo install probe-rs-tools --locked` **+ an external SWD probe** |
+The **one exception is ESP-IDF (`std`) development**. That toolchain — the C
+ESP-IDF SDK and its per-OS system packages — is set up outside this tool and
+differs by operating system, so it's documented upstream:
+[esp-idf-template → Prerequisites](https://github.com/esp-rs/esp-idf-template#prerequisites)
+and the [Rust on ESP Book](https://esp-rs.github.io/book/). (The first `--std`
+build then compiles the whole ESP-IDF SDK, so expect it to be slow.)
 
 **Enter the bootloader before flashing** — ESP: just plug in USB-C. RP2040 /
 RP2350: hold **B** while plugging in. nRF52840: double-tap **RESET**. SAMD21:
 short the two **RST** pads twice.
-
-**`--std` (ESP-IDF) builds** (C3 / C6 / S3 only) additionally need
-`cargo install ldproxy`, `python3` + `git` on `PATH`, and — on C3 / C6 —
-`rustup toolchain install nightly --component rust-src` (the S3 reuses its `esp`
-toolchain). The first build compiles the whole ESP-IDF SDK, so it is slow.
 
 ---
 
@@ -144,10 +159,9 @@ $ xiao-generate --chip xiao-nrf52840 --name blinky
     ✔ Rust target thumbv7em-none-eabihf
 
   prerequisites to flash:
-    ✔ rust-objcopy (cargo-binutils)
-    ✗ uf2conv.py (+ uf2families.json)
-        install: curl -LO .../uf2conv.py && curl -LO .../uf2families.json && chmod +x uf2conv.py   # then put BOTH on PATH
-        · uf2conv.py reads uf2families.json from beside itself — both files must be installed
+    ✗ uf2deploy
+        install: cargo install uf2deploy
+        · converts the ELF to UF2 and copies it to the mounted UF2 drive (nRF: double-tap RESET) — no probe needed
 
 Next steps:
   cd blinky
@@ -155,8 +169,8 @@ Next steps:
 ```
 
 Every `✔` and `✗` there is a live probe of your machine, not a static list — the
-report above is from a host that has `rust-objcopy` but not `uf2conv.py`, and
-only the missing one is given an install command.
+report above is from a host that has the Rust target installed but not
+`uf2deploy`, and only the missing one is given an install command.
 
 ## Editor support
 

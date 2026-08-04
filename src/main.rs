@@ -623,11 +623,11 @@ mod tests {
 
     #[test]
     fn stacks_report_lists_the_supported_flashing_and_logging_subset() {
-        // rp2040 flashes with picotool/probe-rs and logs none/defmt — the
-        // per-stack SUPPORTED subset, not the universal catalog. The ESP-only
+        // rp2040 flashes with elf2uf2-rs/uf2deploy/probe-rs and logs none/defmt —
+        // the per-stack SUPPORTED subset, not the universal catalog. The ESP-only
         // catalog entries (espflash, the `log` frontend) must never leak in.
         let report = stacks_report(registry::variant("xiao-rp2040").unwrap());
-        assert!(report.contains("flashing: picotool, probe-rs"), "got:\n{report}");
+        assert!(report.contains("flashing: elf2uf2-rs, uf2deploy, probe-rs"), "got:\n{report}");
         assert!(report.contains("logging: none, defmt"), "got:\n{report}");
         assert!(!report.contains("espflash"), "espflash is ESP-only:\n{report}");
         assert!(!report.contains("logging: none, log, defmt"), "`log` is ESP-only:\n{report}");

@@ -17,7 +17,7 @@ Make sure you have Rust and its tools installed. If not, follow [these instructi
 To generate a template, you first need to install `xiao-generate`:
 
 ```sh
-cargo install xiao-generate
+cargo install xiao-generate --locked
 ```
 
 Afterward, there are two modes, and they resolve the same configuration through the same validation before either one generates anything.

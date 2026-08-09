@@ -145,6 +145,15 @@ Every `✔` and `✗` there is a live probe of your machine, not a static list �
 report above is from a host that has the Rust target installed but not
 `uf2deploy`, and only the missing one is given an install command.
 
+## AI use
+
+This project accepts AI-assisted contributions under conditions. Before opening a
+pull request, read [AI_POLICY.md](AI_POLICY.md). To summarize, AI as a tool is
+fine, but you must understand and be able to explain everything you submit; a
+human must be the interface for all contributions; disclosure is required in the
+PR template, and every change must state how it was verified. Autonomous agent
+submissions will be closed.
+
 ## Licence
 
 MIT OR Apache-2.0

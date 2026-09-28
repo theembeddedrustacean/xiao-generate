@@ -217,7 +217,7 @@ _tool_line() { # name, have, install-hint
   if [ "$2" = 1 ]; then printf '  %-34s %s\n' "$1" "${C_GRN}present${C_OFF}"
   else printf '  %-34s %s\n' "$1" "${C_YEL}MISSING${C_OFF} -> $3"; fi
 }
-_tool_line "esp-generate (esp-hal backend)" "$HAVE_ESP_GENERATE" "cargo install esp-generate --version 1.3.0 --locked"
+_tool_line "esp-generate (esp-hal backend)" "$HAVE_ESP_GENERATE" "cargo install esp-generate --version 1.4.0 --locked"
 _tool_line "cargo-generate (esp-idf backend)" "$HAVE_CARGO_GEN"  "cargo install cargo-generate --locked"
 _tool_line "espflash (ESP flashing)"        "$HAVE_ESPFLASH"     "cargo install espflash --locked"
 _tool_line "elf2uf2-rs (RP2040/RP2350 flash)" "$HAVE_ELF2UF2"    "cargo install elf2uf2-rs"
@@ -477,7 +477,7 @@ skip_reason() { # target stack
   case "$target" in
     riscv32*-none-elf|xtensa-*-none-elf)
       [ $HAVE_ESP_GENERATE = 1 ] || {
-        printf 'esp-generate not installed (esp-hal backend) -- cargo install esp-generate --version 1.3.0 --locked'; return; } ;;
+        printf 'esp-generate not installed (esp-hal backend) -- cargo install esp-generate --version 1.4.0 --locked'; return; } ;;
   esac
   case "$target" in
     *-espidf)

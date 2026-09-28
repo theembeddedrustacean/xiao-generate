@@ -5,12 +5,12 @@
 //! CONTRIBUTING.md at M3).
 //!
 //! Provenance for every value in this file is recorded in `research/*.md`
-//! (Seeed wiki pin maps, driver-crate versions, esp-generate 1.3.0 option
+//! (Seeed wiki pin maps, driver-crate versions, esp-generate 1.4.0 option
 //! audit, uferris-bsp 0.1.3 manifest). Unverified values are NOT invented —
 //! they are left `None` and the affected template is gated or omitted.
 
 /// Pinned backend/tool versions for this xiao-generate release (R5).
-pub const ESP_GENERATE_VERSION: &str = "1.3.0";
+pub const ESP_GENERATE_VERSION: &str = "1.4.0";
 pub const UFERRIS_BSP_VERSION: &str = "0.1.3";
 
 // --- ESP `std` stack (M5): cargo-generate + esp-idf-template pins (R5) ---
@@ -276,7 +276,7 @@ pub struct Template {
     pub id: &'static str,
     pub display: &'static str,
     /// esp-generate `-o` options this template's scaffold requires. These sets
-    /// are pre-validated against the 1.3.0 constraint graph (see `ESP_OPTIONS`)
+    /// are pre-validated against the 1.4.0 constraint graph (see `ESP_OPTIONS`)
     /// and compile-verified (see tests + research/upstream).
     pub esp_options: &'static [&'static str],
     /// Extra crates added to `Cargo.toml` after scaffolding.
@@ -297,7 +297,7 @@ pub struct Variant {
     pub id: &'static str,
     pub display: &'static str,
     pub priority: u8,
-    /// esp-generate `--chip` / esp-idf-template `mcu` value (ESP), or the
+    /// esp-generate chip option (`-o <chip>`) / esp-idf-template `mcu` value (ESP), or the
     /// non-ESP chip family id (`rp2040`, `rp235x`, `nrf52840`, `atsamd21`) that
     /// selects the scaffold's base body. Shared across a variant's stacks.
     pub chip: &'static str,
@@ -349,11 +349,15 @@ impl Variant {
 }
 
 // ---------------------------------------------------------------------------
-// esp-generate 1.3.0 option constraint graph (research/esp-generate-options.md).
+// esp-generate 1.4.0 option constraint graph (research/esp-generate-options.md).
 // This is an INTERNAL backend detail of the esp-hal stack — the esp-generate
 // `-o` flag names below never appear in any user-facing UI or summary text (the
 // universal catalogs above are what the user sees). Used to validate any option
 // set before shell-out (D2) and is unit-tested.
+//
+// The chip (esp-generate's required `chip` group, `-o <chip>` since 1.4.0) and
+// the `module` group are not listed: the chip comes from `Variant::chip` and is
+// added by `backend::espgen`, and no module option is ever passed.
 // ---------------------------------------------------------------------------
 
 pub struct EspOption {
@@ -369,21 +373,26 @@ pub struct EspOption {
 pub const ESP_OPTIONS: &[EspOption] = &[
     EspOption { name: "unstable-hal", requires: &[], conflicts: &[], group: None },
     EspOption { name: "alloc", requires: &[], conflicts: &[], group: None },
-    EspOption { name: "wifi", requires: &["alloc", "unstable-hal"], conflicts: &[], group: None },
-    EspOption { name: "ble-bleps", requires: &["alloc", "unstable-hal"], conflicts: &[], group: Some("ble-lib") },
-    EspOption { name: "ble-trouble", requires: &["alloc", "unstable-hal", "embassy"], conflicts: &[], group: Some("ble-lib") },
+    EspOption { name: "wifi", requires: &["alloc", "unstable-hal", "embassy"], conflicts: &[], group: None },
+    EspOption { name: "ble-trouble", requires: &["alloc", "unstable-hal", "embassy"], conflicts: &[], group: None },
     EspOption { name: "embassy", requires: &["unstable-hal"], conflicts: &[], group: None },
     EspOption { name: "stack-smashing-protection", requires: &[], conflicts: &[], group: None },
     EspOption { name: "probe-rs", requires: &[], conflicts: &["log", "esp-backtrace"], group: None },
     EspOption { name: "defmt", requires: &[], conflicts: &[], group: Some("log-frontend") },
     EspOption { name: "panic-rtt-target", requires: &["probe-rs"], conflicts: &[], group: Some("panic-handler") },
     EspOption { name: "embedded-test", requires: &["probe-rs"], conflicts: &[], group: None },
+    EspOption { name: "cargo-embed", requires: &["probe-rs"], conflicts: &[], group: None },
     EspOption { name: "log", requires: &[], conflicts: &["probe-rs"], group: Some("log-frontend") },
     EspOption { name: "esp-backtrace", requires: &[], conflicts: &["probe-rs"], group: Some("panic-handler") },
     EspOption { name: "wokwi", requires: &[], conflicts: &[], group: None },
     EspOption { name: "ci", requires: &[], conflicts: &[], group: None },
+    EspOption { name: "agents", requires: &[], conflicts: &[], group: Some("coding-agent-guidance") },
+    EspOption { name: "claude", requires: &[], conflicts: &[], group: Some("coding-agent-guidance") },
+    EspOption { name: "codex", requires: &[], conflicts: &[], group: Some("coding-agent-guidance") },
+    EspOption { name: "gemini", requires: &[], conflicts: &[], group: Some("coding-agent-guidance") },
     EspOption { name: "helix", requires: &[], conflicts: &[], group: None },
-    EspOption { name: "neovim", requires: &[], conflicts: &[], group: None },
+    EspOption { name: "neovim-classic", requires: &[], conflicts: &[], group: Some("neovim") },
+    EspOption { name: "neovim-rustaceanvim", requires: &[], conflicts: &[], group: Some("neovim") },
     EspOption { name: "vscode", requires: &[], conflicts: &[], group: None },
     EspOption { name: "zed", requires: &[], conflicts: &[], group: None },
 ];
@@ -1891,8 +1900,9 @@ mod tests {
         // requires
         assert!(validate_esp_options(&["embassy"]).is_err(), "embassy requires unstable-hal");
         assert!(validate_esp_options(&["embassy", "unstable-hal"]).is_ok());
-        assert!(validate_esp_options(&["wifi", "unstable-hal"]).is_err(), "wifi requires alloc");
-        assert!(validate_esp_options(&["wifi", "unstable-hal", "alloc"]).is_ok());
+        assert!(validate_esp_options(&["wifi", "unstable-hal", "embassy"]).is_err(), "wifi requires alloc");
+        assert!(validate_esp_options(&["wifi", "unstable-hal", "alloc"]).is_err(), "wifi requires embassy");
+        assert!(validate_esp_options(&["wifi", "unstable-hal", "alloc", "embassy"]).is_ok());
         // mutual-exclusion groups
         assert!(validate_esp_options(&["defmt", "log"]).is_err(), "log-frontend group");
         assert!(validate_esp_options(&["esp-backtrace", "panic-rtt-target", "probe-rs"]).is_err());

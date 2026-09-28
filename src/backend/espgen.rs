@@ -27,7 +27,7 @@ pub fn preflight() -> Result<String> {
     if !out.status.success() {
         bail!("`esp-generate --version` failed");
     }
-    // "esp-generate 1.3.0"
+    // "esp-generate 1.4.0"
     let ver = String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .nth(1)
@@ -37,7 +37,8 @@ pub fn preflight() -> Result<String> {
 }
 
 pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
-    // Install the pinned esp-generate on demand (with consent) if it is missing.
+    // Install the pinned esp-generate on demand (with consent) if it is missing
+    // or a different version.
     bootstrap::ensure_esp_generate(consent)?;
 
     let installed = preflight()?;
@@ -51,7 +52,7 @@ pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
     }
 
     // Defense in depth: our registry option sets are pre-validated, but re-check
-    // against the 1.3.0 constraint graph so we never shell out a combo esp-generate
+    // against the 1.4.0 constraint graph so we never shell out a combo esp-generate
     // would reject (D2). A failure here is an internal registry bug, not user error.
     let opts = cfg.esp_options();
     registry::validate_esp_options(&opts)
@@ -67,9 +68,11 @@ pub fn scaffold(cfg: &Config, consent: Consent) -> Result<()> {
         .with_context(|| format!("creating parent directory {}", parent.display()))?;
 
     let mut cmd = Command::new("esp-generate");
+    // Since esp-generate 1.4.0 the chip is an option in the required `chip`
+    // group (`-o <chip>`); the old `--chip` flag no longer exists.
     cmd.arg("--headless")
         .arg("--skip-update-check")
-        .arg("--chip")
+        .arg("-o")
         .arg(cfg.variant.chip);
     for opt in cfg.esp_options() {
         cmd.arg("-o").arg(opt);

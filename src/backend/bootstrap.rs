@@ -49,9 +49,11 @@ impl Consent {
 }
 
 /// Ensure `esp-generate` (the pinned version) is available for the `no_std` stack.
+/// An older install counts as missing: esp-generate's CLI changes between
+/// minors (1.4.0 dropped `--chip`), so a stale binary would fail the scaffold.
 pub fn ensure_esp_generate(consent: Consent) -> Result<()> {
     ensure(
-        "esp-generate",
+        &format!("esp-generate {ESP_GENERATE_VERSION}"),
         esp_generate_present,
         &["install", "esp-generate", "--version", ESP_GENERATE_VERSION, "--locked"],
         consent,
@@ -151,7 +153,16 @@ fn run_install(cmd: &str) -> Result<bool> {
 }
 
 fn esp_generate_present() -> bool {
-    runs(Command::new("esp-generate").arg("--version"))
+    // "esp-generate 1.4.0" — only the pinned version counts as present.
+    Command::new("esp-generate")
+        .arg("--version")
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1)
+                    == Some(ESP_GENERATE_VERSION)
+        })
+        .unwrap_or(false)
 }
 
 fn cargo_generate_present() -> bool {

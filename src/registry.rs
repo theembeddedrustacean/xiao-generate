@@ -329,6 +329,63 @@ pub struct Variant {
 }
 
 impl Variant {
+    /// The `probe-rs` target name for this part (`probe-rs chip list`), or `None`
+    /// on the ESP parts, whose runner esp-generate / esp-idf-template own.
+    pub fn probe_rs_chip(&self) -> Option<&'static str> {
+        match self.chip {
+            "rp2040" => Some("RP2040"),
+            "rp235x" => Some("RP235x"),
+            "nrf52840" => Some("nRF52840_xxAA"),
+            "nrf54l15" => Some("nRF54L15"),
+            "atsamd21" => Some("ATSAMD21G18A"),
+            _ => None,
+        }
+    }
+
+    /// The `uf2deploy --family` preset (lower-cased `uf2families.json` short
+    /// name) for this part's UF2 bootloader, or `None` where it has none.
+    pub fn uf2_family(&self) -> Option<&'static str> {
+        match self.chip {
+            "rp2040" => Some("rp2040"),
+            "rp235x" => Some("rp2350_arm_s"),
+            "nrf52840" => Some("nrf52840"),
+            "atsamd21" => Some("samd21"),
+            _ => None,
+        }
+    }
+
+    /// The cargo `runner` for a non-ESP project flashed with `flashing` (a
+    /// [`FLASHING_TOOLS`] id). Cargo appends the ELF path. `None` for the ESP
+    /// tools, whose generated templates already carry their own runner.
+    pub fn cargo_runner(&self, flashing: &str) -> Option<String> {
+        match flashing {
+            "elf2uf2-rs" => Some("elf2uf2-rs -d".to_string()),
+            "uf2deploy" => self
+                .uf2_family()
+                .map(|f| format!("uf2deploy deploy -f {f} -p auto")),
+            "hf2" => Some("hf2 elf".to_string()),
+            "probe-rs" => self
+                .probe_rs_chip()
+                .map(|c| format!("probe-rs run --chip {c}")),
+            _ => None,
+        }
+    }
+
+    /// What the user must do to the board before `cargo run` for a UF2/HID
+    /// route (enter the bootloader), or `None` when the runner needs nothing.
+    pub fn flash_hint(&self, flashing: &str) -> Option<&'static str> {
+        if !matches!(flashing, "elf2uf2-rs" | "uf2deploy" | "hf2") {
+            return None;
+        }
+        match self.chip {
+            "rp2040" => Some("first: hold BOOT (B) and tap RESET (R) so the RPI-RP2 drive mounts"),
+            "rp235x" => Some("first: hold BOOT (B) and tap RESET (R) so the RP2350 drive mounts"),
+            "nrf52840" => Some("first: double-tap RESET so the UF2 bootloader drive mounts"),
+            "atsamd21" => Some("first: short the RST pads twice quickly so the Arduino drive mounts"),
+            _ => None,
+        }
+    }
+
     /// Default stack (first listed).
     pub fn default_stack(&self) -> &'static Stack {
         let stacks: &'static [Stack] = self.stacks;
@@ -962,8 +1019,15 @@ const IDF_NONE: &[&str] = &[];
 ///  - FRAMEWORK: `none` generates the blocking/no-executor body, `embassy` the
 ///    executor body — but only on an embassy HAL, see `Scaffold::framework_gaps`.
 const RP_FLASHING: &[&str] = &["elf2uf2-rs", "uf2deploy", "probe-rs"];
+/// XIAO RP2350: `elf2uf2-rs` (2.2.0, latest) hard-codes the RP2040 UF2 family id
+/// (0xe48bff56), and the RP2350 bootrom rejects that family — so the RP2350
+/// leads with `uf2deploy`, which writes the `rp2350_arm_s` family (0xe48bff59).
+const RP2350_FLASHING: &[&str] = &["uf2deploy", "probe-rs"];
 const NRF_FLASHING: &[&str] = &["uf2deploy", "probe-rs"];
-const SAMD_FLASHING: &[&str] = &["hf2", "uf2deploy", "probe-rs"];
+/// XIAO SAMD21: uf2deploy leads. hf2-cli 0.3.3 writes and verifies the image
+/// but panics on its final reset-into-app command once the board drops off USB,
+/// so `cargo run` reports a failure after every successful flash.
+const SAMD_FLASHING: &[&str] = &["uf2deploy", "hf2", "probe-rs"];
 /// XIAO nRF54L15: the board's onboard SAMD11 CMSIS-DAP debugger (over its USB-C
 /// port) makes `probe-rs run --chip nrf54l15` the no-external-hardware route — and
 /// the ONLY one. The nRF54L15 has no UF2 bootloader, so there is no uf2deploy/UF2
@@ -1645,7 +1709,7 @@ pub const VARIANTS: &[Variant] = &[
                 target: "thumbv8m.main-none-eabihf",
                 templates: NON_ESP_RP,
                 uferris: false,
-                flashing: RP_FLASHING,
+                flashing: RP2350_FLASHING,
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&RP235X_HAL_SCAFFOLD),
@@ -1660,7 +1724,7 @@ pub const VARIANTS: &[Variant] = &[
                 target: "thumbv8m.main-none-eabihf",
                 templates: NON_ESP_RP,
                 uferris: false,
-                flashing: RP_FLASHING,
+                flashing: RP2350_FLASHING,
                 logging: ARM_LOGGING,
                 frameworks: RP_FRAMEWORKS,
                 scaffold: Some(&EMBASSY_RP235X_SCAFFOLD),
@@ -2199,7 +2263,7 @@ mod tests {
         let nrf = variant("xiao-nrf52840").unwrap().default_stack();
         assert_eq!(nrf.support(ToolCategory::Flashing), &["uf2deploy", "probe-rs"]);
         let samd = variant("xiao-samd21").unwrap().default_stack();
-        assert_eq!(samd.support(ToolCategory::Flashing), &["hf2", "uf2deploy", "probe-rs"]);
+        assert_eq!(samd.support(ToolCategory::Flashing), &["uf2deploy", "hf2", "probe-rs"]);
         assert_eq!(samd.support(ToolCategory::Logging), &["none", "defmt"]);
         assert_eq!(samd.support(ToolCategory::Framework), &["none", "rtic"]);
     }
@@ -2402,6 +2466,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_non_esp_flashing_choice_has_a_cargo_runner() {
+        // `cargo run` must flash: every flashing id a non-ESP stack offers maps
+        // to a runner on that variant, and a UF2 route always has a family.
+        for v in VARIANTS {
+            for st in v.stacks.iter().filter(|s| !s.backend.is_esp()) {
+                for id in st.support(ToolCategory::Flashing) {
+                    assert!(v.cargo_runner(id).is_some(), "{}/{}/{id}: no runner", v.id, st.id);
+                }
+            }
+        }
+        let v = |id| variant(id).unwrap();
+        assert_eq!(v("xiao-rp2040").cargo_runner("elf2uf2-rs").unwrap(), "elf2uf2-rs -d");
+        assert_eq!(
+            v("xiao-rp2350").cargo_runner("uf2deploy").unwrap(),
+            "uf2deploy deploy -f rp2350_arm_s -p auto"
+        );
+        assert_eq!(
+            v("xiao-nrf52840").cargo_runner("uf2deploy").unwrap(),
+            "uf2deploy deploy -f nrf52840 -p auto"
+        );
+        assert_eq!(v("xiao-samd21").cargo_runner("hf2").unwrap(), "hf2 elf");
+        assert_eq!(
+            v("xiao-nrf54l15").cargo_runner("probe-rs").unwrap(),
+            "probe-rs run --chip nRF54L15"
+        );
+        assert_eq!(
+            v("xiao-rp2040").cargo_runner("probe-rs").unwrap(),
+            "probe-rs run --chip RP2040"
+        );
+        // ESP tools: the generated template owns the runner.
+        assert!(v("xiao-esp32c3").cargo_runner("espflash").is_none());
+        // Bootloader hint only for the UF2/HID routes.
+        assert!(v("xiao-rp2040").flash_hint("elf2uf2-rs").is_some());
+        assert!(v("xiao-nrf52840").flash_hint("uf2deploy").is_some());
+        assert!(v("xiao-rp2040").flash_hint("probe-rs").is_none());
+        assert!(v("xiao-nrf54l15").flash_hint("probe-rs").is_none());
+    }
+
     /// The flash route is a property of the user's flashing choice on every stack
     /// except esp-idf (whose template fixes it). The DEFAULT route for each stack
     /// is pinned here against `scripts/matrix.sh`, which is the script that
@@ -2420,15 +2523,17 @@ mod tests {
                 .unwrap()
                 .prereqs
         };
-        // RP2040/RP2350: elf2uf2-rs converts the ELF and drops the UF2 onto the
-        // BOOTSEL mass-storage volume in one step.
-        for (chip, stacks) in [
-            ("xiao-rp2040", ["rp2040-hal", "embassy-rp"]),
-            ("xiao-rp2350", ["rp235x-hal", "embassy-rp"]),
-        ] {
-            for s in stacks {
-                assert_eq!(default_route(chip, s), &["elf2uf2-rs"], "{chip}/{s}");
-            }
+        // RP2040: elf2uf2-rs converts the ELF and drops the UF2 onto the BOOTSEL
+        // mass-storage volume in one step.
+        for s in ["rp2040-hal", "embassy-rp"] {
+            assert_eq!(default_route("xiao-rp2040", s), &["elf2uf2-rs"], "rp2040/{s}");
+        }
+        // RP2350: elf2uf2-rs only writes the RP2040 UF2 family, which the RP2350
+        // bootrom rejects — uf2deploy (family rp2350_arm_s) leads instead.
+        for s in ["rp235x-hal", "embassy-rp"] {
+            assert_eq!(default_route("xiao-rp2350", s), &["uf2deploy"], "rp2350/{s}");
+            let st = variant("xiao-rp2350").unwrap().stack(s).unwrap();
+            assert!(!st.support(ToolCategory::Flashing).contains(&"elf2uf2-rs"), "rp2350/{s}");
         }
         // nRF52840: uf2deploy converts the ELF and copies the UF2 to the
         // double-tap bootloader volume in one step.
@@ -2440,8 +2545,8 @@ mod tests {
                 assert_eq!(default_route(chip, s), &["uf2deploy"], "{chip}/{s}");
             }
         }
-        // SAMD21: hf2 takes the ELF directly over HID.
-        assert_eq!(default_route("xiao-samd21", "atsamd-hal"), &["hf2"]);
+        // SAMD21: uf2deploy copies the UF2 to the double-reset bootloader volume.
+        assert_eq!(default_route("xiao-samd21", "atsamd-hal"), &["uf2deploy"]);
         // esp-idf: the template's cargo runner is espflash, and FLASHING is not a
         // live axis there, so it is fixed stack data.
         assert_eq!(

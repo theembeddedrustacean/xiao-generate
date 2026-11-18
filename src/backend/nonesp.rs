@@ -175,8 +175,17 @@ fn cargo_config(cfg: &Config, sc: &Scaffold) -> String {
         rustflags.push("-C");
         rustflags.push("link-arg=-Tdefmt.x");
     }
+    // `cargo run` flashes through the chosen `--flashing` tool, like the ESP
+    // templates' espflash runner.
+    let runner = cfg.variant.cargo_runner(cfg.flashing.id);
+    if runner.is_some() || !rustflags.is_empty() {
+        s.push_str(&format!("\n[target.{}]\n", cfg.stack.target));
+    }
+    if let Some(runner) = runner {
+        s.push_str(&format!("runner = \"{runner}\"\n"));
+    }
     if !rustflags.is_empty() {
-        s.push_str(&format!("\n[target.{}]\nrustflags = [\n", cfg.stack.target));
+        s.push_str("rustflags = [\n");
         for chunk in rustflags.chunks(2) {
             let rendered = chunk
                 .iter()

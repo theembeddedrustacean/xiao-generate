@@ -910,6 +910,38 @@ fn rp2350_config_target_header_is_unquoted() {
     assert!(cfg.contains("-Tlink.x"), "{cfg}");
 }
 
+/// `cargo run` flashes a non-ESP project through the `--flashing` choice: the
+/// runner sits under the single, unquoted `[target.<triple>]` table. Without
+/// it, cargo tries to execute the ARM ELF on the host.
+#[test]
+fn non_esp_config_carries_a_runner_for_the_flashing_choice() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (chip, flashing, target, runner) in [
+        ("xiao-rp2040", None, "thumbv6m-none-eabi", "elf2uf2-rs -d"),
+        ("xiao-rp2040", Some("probe-rs"), "thumbv6m-none-eabi", "probe-rs run --chip RP2040"),
+        ("xiao-rp2350", None, "thumbv8m.main-none-eabihf", "uf2deploy deploy -f rp2350_arm_s -p auto"),
+        ("xiao-nrf52840", None, "thumbv7em-none-eabihf", "uf2deploy deploy -f nrf52840 -p auto"),
+        ("xiao-nrf54l15", None, "thumbv8m.main-none-eabihf", "probe-rs run --chip nRF54L15"),
+        ("xiao-samd21", None, "thumbv6m-none-eabi", "uf2deploy deploy -f samd21 -p auto"),
+        ("xiao-samd21", Some("hf2"), "thumbv6m-none-eabi", "hf2 elf"),
+    ] {
+        let out = tmp.path().join(format!("{chip}-{}", flashing.unwrap_or("default")));
+        let mut args = vec!["--chip", chip];
+        if let Some(f) = flashing {
+            args.extend_from_slice(&["--flashing", f]);
+        }
+        generate(&args, &out);
+        let cfg = std::fs::read_to_string(out.join(".cargo/config.toml")).unwrap();
+        let table = format!("[target.{target}]");
+        let t = cfg.find(&table).unwrap_or_else(|| panic!("{chip}: no {table}:\n{cfg}"));
+        assert!(
+            cfg[t..].contains(&format!("runner = \"{runner}\"")),
+            "{chip}/{flashing:?}: runner under {table}:\n{cfg}"
+        );
+        assert_eq!(cfg.matches(&table).count(), 1, "{chip}: one target table:\n{cfg}");
+    }
+}
+
 #[test]
 fn non_esp_framework_axis_changes_the_generated_project() {
     let tmp = tempfile::tempdir().unwrap();

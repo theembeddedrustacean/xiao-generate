@@ -976,7 +976,7 @@ mod tests {
         // The DEFAULT flashing route is the board's no-probe tool, never espflash.
         assert_eq!(Config::resolve(raw("xiao-rp2040")).unwrap().flashing.id, "elf2uf2-rs");
         assert_eq!(Config::resolve(raw("xiao-nrf52840")).unwrap().flashing.id, "uf2deploy");
-        assert_eq!(Config::resolve(raw("xiao-samd21")).unwrap().flashing.id, "hf2");
+        assert_eq!(Config::resolve(raw("xiao-samd21")).unwrap().flashing.id, "uf2deploy");
 
         // `--logging defmt` is accepted; `--logging log` is refused as ESP-only.
         let mut r = raw("xiao-rp2040");
@@ -1823,10 +1823,10 @@ mod tests {
     fn non_esp_boards_get_their_own_usb_flash_route() {
         for (chip, want) in [
             ("xiao-rp2040", vec!["elf2uf2-rs"]),
-            ("xiao-rp2350", vec!["elf2uf2-rs"]),
+            ("xiao-rp2350", vec!["uf2deploy"]),
             ("xiao-nrf52840", vec!["uf2deploy"]),
             ("xiao-nrf52840-sense", vec!["uf2deploy"]),
-            ("xiao-samd21", vec!["hf2"]),
+            ("xiao-samd21", vec!["uf2deploy"]),
         ] {
             let ids = prereq_ids(chip, |_| {});
             let flash: Vec<&str> = ids

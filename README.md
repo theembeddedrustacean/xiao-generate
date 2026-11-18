@@ -139,7 +139,12 @@ $ xiao-generate --chip xiao-nrf52840 --name blinky
 Next steps:
   cd blinky
   cargo build
+  (first: double-tap RESET so the UF2 bootloader drive mounts)
+  cargo run
 ```
+
+`cargo run` flashes through the chosen `--flashing` tool: every generated
+project's `.cargo/config.toml` sets a cargo `runner` for it.
 
 Every `✔` and `✗` there is a live probe of your machine, not a static list — the
 report above is from a host that has the Rust target installed but not

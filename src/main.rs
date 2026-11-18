@@ -497,6 +497,12 @@ fn print_next_steps(cfg: &Config) {
             cfg.espidf_version
         );
     }
+    // Every stack ships a cargo runner (the ESP templates' own, or the one
+    // `nonesp::cargo_config` writes), so `cargo run` flashes.
+    if let Some(hint) = cfg.variant.flash_hint(cfg.flashing.id) {
+        println!("  ({hint})");
+    }
+    println!("  cargo run");
 }
 
 #[cfg(test)]
